@@ -30,5 +30,10 @@ contextBridge.exposeInMainWorld('studio', {
 	saveSession: state => ipcRenderer.invoke('session:save', state),
 
 	info: () => ipcRenderer.invoke('app:info'),
+
+	/** What this machine has: Python, and whether a model server is installed. */
+	probe: () => ipcRenderer.invoke('setup:probe'),
+	startOllama: () => ipcRenderer.invoke('setup:startOllama'),
+	openUrl: url => ipcRenderer.invoke('setup:openUrl', url),
 	reportError: message => ipcRenderer.invoke('app:error', message),
 });

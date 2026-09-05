@@ -518,3 +518,195 @@ kbd {
 .out .where {
 	color: var(--text-faint);
 }
+
+/* --- setup --------------------------------------------------------------- */
+
+.card.setup {
+	border-left-color: var(--accent);
+}
+
+.setup-title {
+	font-weight: 650;
+	color: var(--accent);
+	font-size: 13.5px;
+}
+
+.steps {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.step {
+	display: flex;
+	gap: 9px;
+	padding: 7px 0;
+	border-top: 1px solid var(--line);
+	align-items: flex-start;
+}
+
+.step:first-child {
+	border-top: none;
+}
+
+.step-mark {
+	flex: 0 0 16px;
+	line-height: 1.5;
+	text-align: center;
+	font-size: 12px;
+}
+
+.step-mark.ok {
+	color: var(--ok);
+}
+
+.step-mark.todo {
+	color: var(--text-faint);
+}
+
+.step-body {
+	flex: 1;
+	min-width: 0;
+}
+
+.step-title {
+	color: var(--text);
+	line-height: 1.45;
+}
+
+.step-note {
+	color: var(--text-faint);
+	font-size: 11.5px;
+	line-height: 1.5;
+	margin-top: 2px;
+}
+
+.step-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 7px;
+}
+
+/* A download that may take minutes needs to look like it is moving. */
+.bar-track {
+	height: 5px;
+	border-radius: 3px;
+	background: #1c1c24;
+	overflow: hidden;
+	margin-top: 7px;
+}
+
+.bar-fill {
+	height: 100%;
+	width: 0;
+	background: var(--accent);
+	transition: width 200ms linear;
+}
+
+/* --- wrong answer -------------------------------------------------------- */
+
+.card.wrong {
+	border-left-color: #d9a63a;
+}
+
+.err-type.wrong {
+	color: #d9a63a;
+}
+
+.diff {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 8px;
+	margin-bottom: 10px;
+}
+
+.diff-col {
+	min-width: 0;
+}
+
+.diff-label {
+	display: block;
+	color: var(--text-faint);
+	font-size: 10.5px;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	margin-bottom: 3px;
+}
+
+.diff-text {
+	margin: 0;
+	padding: 7px 8px;
+	background: #131318;
+	border-radius: var(--radius-sm);
+	font-family: var(--mono);
+	font-size: 11.5px;
+	line-height: 1.5;
+	color: var(--ok);
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-height: 130px;
+	overflow: auto;
+}
+
+.diff-text.bad {
+	color: var(--bad);
+}
+
+/* --- expected output ----------------------------------------------------- */
+
+.expect {
+	border-top: 1px solid var(--line);
+	flex: 0 0 auto;
+}
+
+.expect-head {
+	width: 100%;
+	justify-content: flex-start;
+	border-radius: 0;
+	padding: 8px 14px;
+	color: var(--text-faint);
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+}
+
+.expect-head:hover {
+	color: var(--text-dim);
+}
+
+.chev {
+	display: inline-block;
+	transition: transform 140ms ease;
+}
+
+.expect-head[aria-expanded="true"] .chev {
+	transform: rotate(90deg);
+}
+
+.opt {
+	text-transform: none;
+	letter-spacing: 0;
+	color: #4a4a55;
+	font-size: 10.5px;
+}
+
+.expect-box {
+	display: block;
+	width: calc(100% - 28px);
+	margin: 0 14px 12px;
+	padding: 8px 9px;
+	background: var(--bg-inset);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-sm);
+	color: var(--text-dim);
+	font-family: var(--mono);
+	font-size: 12px;
+	line-height: 1.5;
+	resize: vertical;
+}
+
+.expect-box:focus {
+	outline: none;
+	border-color: var(--accent);
+}

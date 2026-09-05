@@ -13,7 +13,7 @@
 
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -195,15 +195,56 @@ ipcMain.handle('session:save', async (_event, state) => {
 // --- running python -----------------------------------------------------------
 
 /**
- * Resolves the interpreter. `python` on PATH is a 0-byte Windows Store alias on
- * many machines; it forwards correctly when Python came from the Store, so it
- * stays the first choice, with `py -3` behind it for a normal install.
+ * Candidate interpreters, best first.
+ *
+ * No single name works everywhere. On Windows `python` is often a 0-byte Store
+ * alias that forwards correctly when Python came from the Store and opens the
+ * Store when it did not, so the `py` launcher is tried first. On macOS `python`
+ * may still be a 2.7 stub. On Linux either name can be missing.
  */
-function pythonCommand() {
-	if (process.platform === 'win32') {
-		return { cmd: 'python', args: [] };
+const PYTHON_CANDIDATES = process.platform === 'win32'
+	? [['py', ['-3']], ['python', []], ['python3', []]]
+	: [['python3', []], ['python', []]];
+
+/** Resolved once and reused; probing spawns processes and is not free. */
+let pythonResolved;
+
+/**
+ * Finds a working Python 3. Returns undefined when there is none, so the UI can
+ * say so instead of every run failing with a spawn error.
+ */
+async function resolvePython() {
+	if (pythonResolved !== undefined) {
+		return pythonResolved || undefined;
 	}
-	return { cmd: 'python3', args: [] };
+
+	for (const [cmd, args] of PYTHON_CANDIDATES) {
+		const version = await new Promise(resolve => {
+			let out = '';
+			let child;
+			try {
+				child = spawn(cmd, [...args, '--version'], { windowsHide: true });
+			} catch {
+				resolve(undefined);
+				return;
+			}
+			// A Store alias can hang instead of answering; do not wait forever.
+			const timer = setTimeout(() => { child.kill(); resolve(undefined); }, 4000);
+			child.stdout.on('data', c => { out += c; });
+			child.stderr.on('data', c => { out += c; });   // 2.x prints to stderr
+			child.on('error', () => { clearTimeout(timer); resolve(undefined); });
+			child.on('close', () => { clearTimeout(timer); resolve(out.trim()); });
+		});
+
+		const m = /Python (\d+)\.(\d+)\.(\d+)/.exec(version ?? '');
+		if (m && Number(m[1]) >= 3) {
+			pythonResolved = { cmd, args, version: `${m[1]}.${m[2]}.${m[3]}` };
+			return pythonResolved;
+		}
+	}
+
+	pythonResolved = null;
+	return undefined;
 }
 
 ipcMain.handle('run:start', async (_event, code) => {
@@ -212,7 +253,19 @@ ipcMain.handle('run:start', async (_event, code) => {
 	await fs.mkdir(STATE_DIR, { recursive: true });
 	await fs.writeFile(SCRATCH_FILE, typeof code === 'string' ? code : '', 'utf8');
 
-	const { cmd, args } = pythonCommand();
+	const python = await resolvePython();
+	if (!python) {
+		return {
+			ok: false,
+			stdout: '',
+			stderr: 'no-python',
+			code: -3,
+			ms: 0,
+			file: SCRATCH_FILE,
+		};
+	}
+
+	const { cmd, args } = python;
 	const started = Date.now();
 
 	return new Promise(resolve => {
@@ -287,6 +340,92 @@ ipcMain.handle('run:start', async (_event, code) => {
 
 ipcMain.handle('run:stop', () => {
 	killCurrent();
+	return true;
+});
+
+// --- setup --------------------------------------------------------------------
+// A first run on a machine that has neither Python nor a model server should
+// explain itself rather than just failing. Everything here is detection plus one
+// action: starting a server that is installed but not running.
+
+/** Where Ollama installs itself, per platform. */
+function ollamaCandidates() {
+	const home = os.homedir();
+	if (process.platform === 'win32') {
+		return [
+			path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'Ollama', 'ollama.exe'),
+			'C:\\Program Files\\Ollama\\ollama.exe',
+		];
+	}
+	if (process.platform === 'darwin') {
+		return ['/usr/local/bin/ollama', '/opt/homebrew/bin/ollama', '/Applications/Ollama.app/Contents/Resources/ollama'];
+	}
+	return ['/usr/local/bin/ollama', '/usr/bin/ollama', path.join(home, '.local', 'bin', 'ollama')];
+}
+
+async function findOllama() {
+	for (const p of ollamaCandidates()) {
+		if (!p) {
+			continue;
+		}
+		try {
+			await fs.access(p);
+			return p;
+		} catch {
+			/* try the next location */
+		}
+	}
+	// Fall back to PATH: a package manager may have put it somewhere else.
+	return new Promise(resolve => {
+		const which = process.platform === 'win32' ? 'where' : 'which';
+		let out = '';
+		let child;
+		try {
+			child = spawn(which, ['ollama'], { windowsHide: true });
+		} catch {
+			resolve(undefined);
+			return;
+		}
+		child.stdout.on('data', c => { out += c; });
+		child.on('error', () => resolve(undefined));
+		child.on('close', code => resolve(code === 0 && out.trim() ? out.trim().split(/\r?\n/)[0] : undefined));
+	});
+}
+
+ipcMain.handle('setup:probe', async () => {
+	const python = await resolvePython();
+	return {
+		platform: process.platform,
+		python: python ? { ok: true, ...python } : { ok: false },
+		ollamaPath: await findOllama(),
+	};
+});
+
+/**
+ * Starts a model server that is installed but not running - the single most
+ * common reason the AI panel is dead on a fresh machine. Detached, so closing
+ * myIDE does not take the server with it.
+ */
+ipcMain.handle('setup:startOllama', async () => {
+	const bin = await findOllama();
+	if (!bin) {
+		return { ok: false, error: 'Ollama is not installed.' };
+	}
+	try {
+		const child = spawn(bin, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true });
+		child.unref();
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, error: err.message };
+	}
+});
+
+/** Opens a URL in the real browser - never inside this window. */
+ipcMain.handle('setup:openUrl', async (_event, url) => {
+	if (typeof url !== 'string' || !/^https:\/\//.test(url)) {
+		return false;
+	}
+	await shell.openExternal(url);
 	return true;
 });
 

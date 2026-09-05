@@ -63,16 +63,16 @@ export async function listModels(provider) {
 	return (json.data ?? []).map(m => m.id);
 }
 
-const SYSTEM_PROMPT = [
+export const SYSTEM_PROMPT = [
 	'You explain Python errors to someone learning data structures and algorithms.',
 	'',
-	'Python has ALREADY identified the error. You are given its exact traceback.',
-	'Your job is to explain that specific error, not to look for other problems.',
+	'You are given either the exact traceback Python produced, or the expected and',
+	'actual output of a run. Explain THAT, and nothing else - do not go looking',
+	'for other problems, and never claim an error other than the one you are given.',
 	'',
 	'Rules:',
 	'- Explain what went wrong in one or two plain sentences. No jargon.',
 	'- Say WHY it happened, referring to the actual line you were given.',
-	'- Never claim a different error than the one in the traceback.',
 	'- Then give the minimal fix as a short code snippet.',
 	'- Under 120 words. No preamble, no restating the question, no pleasantries.',
 ].join('\n');
@@ -81,7 +81,7 @@ const SYSTEM_PROMPT = [
  * Builds the user message. Everything here is fact: the traceback came from
  * Python, the source is what ran, the output is what it printed.
  */
-export function buildPrompt({ code, parsed, stdout, question }) {
+export function buildPrompt({ code, parsed, stdout, expected, question }) {
 	const parts = [];
 
 	if (parsed) {
@@ -99,6 +99,27 @@ export function buildPrompt({ code, parsed, stdout, question }) {
 			}
 			parts.push(`THE FAILING LINE IS ${n}, MARKED > BELOW:`, '```python', window.join('\n'), '```', '');
 		}
+	} else if (expected !== undefined) {
+		// A wrong answer, not a crash. This is the common case in DSA work and
+		// the one a cloud chat gets used for; the model is given both strings so
+		// it compares them rather than reading the whole solution looking for
+		// something to criticise.
+		// Numbered, so the answer can cite a line the way the traceback path does.
+		const numbered = code.split('\n')
+			.map((l, i) => `${String(i + 1).padStart(4)}  ${l}`)
+			.join('\n');
+
+		parts.push(
+			'The program ran without crashing, but printed the wrong answer.',
+			'',
+			'EXPECTED:', '```', expected, '```', '',
+			'ACTUALLY PRINTED:', '```', (stdout ?? '').trim() || '(nothing)', '```', '',
+			'SOURCE:', '```python', numbered, '```', '',
+			'The expected output and the test input are both CORRECT and must not change.',
+			'The bug is in the logic. Name the single line number that produces the',
+			'difference and give the corrected version of that line - do not rewrite',
+			'the whole solution, and never change the input to match the wrong output.',
+		);
 	} else {
 		parts.push(
 			'The program ran to completion with no error.',
@@ -108,11 +129,18 @@ export function buildPrompt({ code, parsed, stdout, question }) {
 		);
 	}
 
-	if (stdout && stdout.trim()) {
+	// Not in the expected-output path: that branch has already shown the output,
+	// and repeating it invites the model to treat the two copies as different.
+	if (expected === undefined && stdout && stdout.trim()) {
 		parts.push('WHAT IT PRINTED:', '```', stdout.trim().slice(0, 2000), '```', '');
 	}
 
-	parts.push(question || (parsed ? 'Explain this error and how to fix it.' : 'Is this output correct?'));
+	const fallback = parsed
+		? 'Explain this error and how to fix it.'
+		: expected !== undefined
+			? 'Why is the output different, and what is the smallest fix?'
+			: 'Is this output correct?';
+	parts.push(question || fallback);
 	return parts.join('\n');
 }
 

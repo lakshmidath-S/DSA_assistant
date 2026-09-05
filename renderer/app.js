@@ -10,9 +10,12 @@
 'use strict';
 
 import { parseTraceback, describe, hintFor } from './errors.js';
-import { PROVIDERS, listModels, pickDefaultModel, buildPrompt, chat, stripReasoning } from './ai.js';
+import {
+	PROVIDERS, listModels, pickDefaultModel, buildPrompt, chat, stripReasoning, SYSTEM_PROMPT,
+} from './ai.js';
 import { Voice } from './voice.js';
 import { render, escapeHtml } from './markdown.js';
+import { probe, isReady, pullModel, waitForProvider, SUGGESTED, pythonHelp, formatBytes } from './setup.js';
 
 /** Blank, deliberately. The empty-state hint carries the guidance instead. */
 const STARTER = '';
@@ -27,6 +30,10 @@ const els = {
 	overlay: $('voice-overlay'), wave: $('wave'), voiceState: $('voice-state'),
 	empty: $('empty'), okOut: $('ok-out'),
 	splitter: $('splitter'), outEmpty: $('out-empty'),
+	setup: $('setup'), setupSteps: $('setup-steps'), setupRecheck: $('setup-recheck'),
+	diffCard: $('diff-card'), diffWant: $('diff-want'), diffGot: $('diff-got'),
+	diffExplain: $('diff-explain'), diffAsk: $('diff-ask'), diffMeta: $('diff-meta'),
+	expect: $('expect'), expectToggle: $('expect-toggle'),
 };
 
 let editor;
@@ -102,7 +109,8 @@ window.monacoLoaded.then(async () => {
 
 	editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, run);
 
-	await detectProvider();
+	restoreExpected();
+	await refreshSetup();
 });
 
 /** The hint is for an empty file only; once there is code it would be in the way. */
@@ -192,8 +200,11 @@ async function run() {
 	els.out.textContent = '';
 	els.card.hidden = true;
 	els.okCard.hidden = true;
+	els.diffCard.hidden = true;
 	els.explain.innerHTML = '';
+	els.diffExplain.innerHTML = '';
 	els.aiMeta.textContent = '';
+	els.diffMeta.textContent = '';
 
 	els.run.disabled = true;
 	els.stop.hidden = false;
@@ -207,14 +218,40 @@ async function run() {
 	els.status.textContent = `Ran in ${(result.ms / 1000).toFixed(1)}s`;
 
 	lastRun = { ...result, code };
+
+	// A missing interpreter is a setup problem, not a bug in the program. Show
+	// the checklist rather than an error that cannot be acted on.
+	if (result.stderr === 'no-python') {
+		els.status.textContent = '';
+		els.out.textContent = '';
+		els.outEmpty.hidden = false;
+		await refreshSetup();
+		els.setup.hidden = false;
+		return;
+	}
+
 	paintOutput(result);
 
 	const parsed = parseTraceback(result.stderr, scratchPath || result.file);
 	if (parsed) {
 		showError(parsed, code);
-	} else {
-		showClean(result);
+		return;
 	}
+
+	// No crash. If an expected output was given, a mismatch is still a failure -
+	// and it is the one this app exists for.
+	const expected = normalise(els.expect.value);
+	const got = normalise(result.stdout);
+	if (expected && expected !== got) {
+		lastRun.expected = expected;
+		showDiff(expected, got);
+		if (ai.provider) {
+			explain(undefined, 'diff');
+		}
+		return;
+	}
+
+	showClean(result, Boolean(expected));
 }
 
 function showError(parsed, code) {
@@ -242,13 +279,16 @@ function showError(parsed, code) {
 	}
 }
 
-function showClean(result) {
+function showClean(result, matchedExpected) {
 	els.okCard.hidden = false;
 	els.card.hidden = true;
+	els.diffCard.hidden = true;
 
 	const printed = (result.stdout ?? '').trim();
 	if (result.timedOut) {
 		els.okMeta.textContent = 'Stopped after 15 seconds — is there a loop that never ends?';
+	} else if (matchedExpected) {
+		els.okMeta.textContent = `Output matches what you expected (${(result.ms / 1000).toFixed(1)}s).`;
 	} else if (printed) {
 		els.okMeta.textContent = `No errors. It printed this in ${(result.ms / 1000).toFixed(1)}s:`;
 	} else {
@@ -333,36 +373,23 @@ els.jump.addEventListener('click', () => {
 
 // --- the model ----------------------------------------------------------------
 
-async function detectProvider() {
-	for (const provider of ['lmstudio', 'ollama']) {
-		try {
-			const models = await listModels(provider);
-			if (models.length) {
-				ai.provider = provider;
-				ai.model = pickDefaultModel(models);
-				els.model.textContent = `${PROVIDERS[provider].label} · ${ai.model}`;
-				return;
-			}
-		} catch {
-			/* try the next provider */
-		}
-	}
-	// No server is a normal state, not an error: running and error-pointing all
-	// work without one. Say so, instead of leaving a dead button.
-	els.model.textContent = 'no model — errors still shown';
-	els.ask.disabled = true;
-	els.ask.title = 'Start LM Studio or Ollama to get explanations';
-}
-
-async function explain(question) {
+/**
+ * @param {string} [question] Free text, e.g. something said out loud.
+ * @param {'error'|'diff'} [target] Which card the answer belongs in.
+ */
+async function explain(question, target = 'error') {
 	if (!ai.provider || !lastRun) {
 		return;
 	}
 	aiAbort?.abort();
 	aiAbort = new AbortController();
 
-	els.explain.innerHTML = '<span class="caret"></span>';
-	els.ask.disabled = true;
+	const out = target === 'diff' ? els.diffExplain : els.explain;
+	const meta = target === 'diff' ? els.diffMeta : els.aiMeta;
+	const askBtn = target === 'diff' ? els.diffAsk : els.ask;
+
+	out.innerHTML = '<span class="caret"></span>';
+	askBtn.disabled = true;
 	const started = Date.now();
 	let text = '';
 
@@ -372,50 +399,35 @@ async function explain(question) {
 			model: ai.model,
 			signal: aiAbort.signal,
 			messages: [
-				{ role: 'system', content: SYSTEM },
+				{ role: 'system', content: SYSTEM_PROMPT },
 				{
 					role: 'user',
 					content: buildPrompt({
 						code: lastRun.code,
 						parsed: lastRun.parsed,
 						stdout: lastRun.stdout,
+						expected: lastRun.expected,
 						question,
 					}),
 				},
 			],
 		}, token => {
 			text += token;
-			els.explain.innerHTML = render(stripReasoning(text)) + '<span class="caret"></span>';
-			els.explain.scrollTop = els.explain.scrollHeight;
+			out.innerHTML = render(stripReasoning(text)) + '<span class="caret"></span>';
+			out.scrollTop = out.scrollHeight;
 		});
 
-		els.explain.innerHTML = render(stripReasoning(text));
-		els.aiMeta.textContent = `${ai.model} · ${((Date.now() - started) / 1000).toFixed(1)}s`;
+		out.innerHTML = render(stripReasoning(text));
+		meta.textContent = `${ai.model} · ${((Date.now() - started) / 1000).toFixed(1)}s`;
 	} catch (err) {
 		if (err.name !== 'AbortError') {
-			els.explain.innerHTML = `<p style="color:var(--bad)">${escapeHtml(err.message)}</p>`;
+			out.innerHTML = `<p style="color:var(--bad)">${escapeHtml(err.message)}</p>`;
 		}
 	} finally {
-		els.ask.disabled = false;
+		askBtn.disabled = false;
 	}
 	return text;
 }
-
-// Kept here rather than in ai.js so the prompt and the UI that renders it stay
-// in one place; they change together.
-const SYSTEM = [
-	'You explain Python errors to someone learning data structures and algorithms.',
-	'',
-	'Python has ALREADY identified the error. You are given its exact traceback.',
-	'Your job is to explain that specific error, not to look for other problems.',
-	'',
-	'Rules:',
-	'- Explain what went wrong in one or two plain sentences. No jargon.',
-	'- Say WHY it happened, referring to the actual line you were given.',
-	'- Never claim a different error than the one in the traceback.',
-	'- Then give the minimal fix as a short code snippet.',
-	'- Under 120 words. No preamble, no restating the question.',
-].join('\n');
 
 els.ask.addEventListener('click', () => explain());
 
@@ -574,3 +586,229 @@ window.addEventListener('keyup', e => {
 
 	window.monacoLoaded.then(() => apply(size));
 })();
+
+// --- setup --------------------------------------------------------------------
+// A machine that cannot yet do the job should say what is missing and, where it
+// can, fix it with one button. Nothing here installs anything without a click.
+
+let setupState;
+
+async function refreshSetup() {
+	setupState = await probe();
+
+	if (setupState.provider && setupState.models.length) {
+		ai.provider = setupState.provider;
+		ai.model = pickDefaultModel(setupState.models);
+		els.model.textContent = `${PROVIDERS[ai.provider].label} · ${ai.model}`;
+		els.ask.disabled = false;
+		els.diffAsk.disabled = false;
+	} else {
+		ai.provider = undefined;
+		els.model.textContent = 'no model yet';
+		els.ask.disabled = true;
+		els.diffAsk.disabled = true;
+	}
+
+	renderSetup(setupState);
+	els.setup.hidden = isReady(setupState);
+}
+
+/** One row of the checklist. */
+function step(done, title, note, actions = []) {
+	const li = document.createElement('li');
+	li.className = 'step';
+
+	const mark = document.createElement('span');
+	mark.className = `step-mark ${done ? 'ok' : 'todo'}`;
+	mark.textContent = done ? '✓' : '○';
+
+	const body = document.createElement('div');
+	body.className = 'step-body';
+
+	const t = document.createElement('div');
+	t.className = 'step-title';
+	t.textContent = title;
+	body.appendChild(t);
+
+	if (note) {
+		const n = document.createElement('div');
+		n.className = 'step-note';
+		n.textContent = note;
+		body.appendChild(n);
+	}
+
+	if (actions.length) {
+		const row = document.createElement('div');
+		row.className = 'step-actions';
+		for (const a of actions) {
+			row.appendChild(a);
+		}
+		body.appendChild(row);
+	}
+
+	li.append(mark, body);
+	return li;
+}
+
+function button(label, onClick, cls = 'ghost small') {
+	const b = document.createElement('button');
+	b.className = cls;
+	b.textContent = label;
+	b.addEventListener('click', onClick);
+	return b;
+}
+
+function renderSetup(state) {
+	els.setupSteps.textContent = '';
+
+	// 1. Python. We cannot install this for you - it needs a real installer and,
+	//    on Windows, a PATH tick box that only the installer can set.
+	if (state.python.ok) {
+		els.setupSteps.appendChild(step(true, `Python ${state.python.version}`, `Using: ${state.python.cmd} ${state.python.args.join(' ')}`.trim()));
+	} else {
+		const help = pythonHelp(state.platform);
+		els.setupSteps.appendChild(step(false, 'Python 3 not found', help.text, [
+			button('Open python.org', () => window.studio.openUrl(help.url)),
+			button('Re-check', refreshSetup),
+		]));
+	}
+
+	// 2. A model server. Installed-but-not-running is the common case and the
+	//    one we can fix here.
+	if (state.provider) {
+		els.setupSteps.appendChild(step(true, `${PROVIDERS[state.provider].label} is running`));
+	} else if (state.ollamaPath) {
+		const start = button('Start Ollama', async () => {
+			start.disabled = true;
+			start.textContent = 'Starting…';
+			const res = await window.studio.startOllama();
+			if (!res.ok) {
+				start.textContent = res.error ?? 'Could not start';
+				return;
+			}
+			await waitForProvider('ollama');
+			await refreshSetup();
+		});
+		els.setupSteps.appendChild(step(false, 'Ollama is installed but not running',
+			'It serves the model on port 11434. Starting it here leaves it running after myIDE closes.',
+			[start]));
+	} else {
+		els.setupSteps.appendChild(step(false, 'No model server',
+			'Ollama is the simplest option: install it, then come back and press Re-check. LM Studio on port 1234 also works.',
+			[
+				button('Get Ollama', () => window.studio.openUrl('https://ollama.com/download')),
+				button('Re-check', refreshSetup),
+			]));
+	}
+
+	// 3. A model. Only offered for Ollama, which has a download API; LM Studio
+	//    downloads happen in its own window.
+	if (state.provider && state.models.length) {
+		els.setupSteps.appendChild(step(true, `${state.models.length} model${state.models.length === 1 ? '' : 's'} available`,
+			state.models.slice(0, 3).join(', ')));
+	} else if (state.provider === 'ollama') {
+		const bar = document.createElement('div');
+		bar.className = 'bar-track';
+		bar.hidden = true;
+		const fill = document.createElement('div');
+		fill.className = 'bar-fill';
+		bar.appendChild(fill);
+
+		const status = document.createElement('div');
+		status.className = 'step-note';
+		status.hidden = true;
+
+		const buttons = SUGGESTED.map(m => button(`${m.label} · ${m.size}`, async () => {
+			for (const b of buttons) {
+				b.disabled = true;
+			}
+			bar.hidden = false;
+			status.hidden = false;
+			status.textContent = 'Starting download…';
+			try {
+				await pullModel(m.id, p => {
+					const pct = p.total ? Math.round((p.completed / p.total) * 100) : 0;
+					fill.style.width = `${pct}%`;
+					status.textContent = p.total
+						? `${p.status} — ${formatBytes(p.completed)} of ${formatBytes(p.total)} (${pct}%)`
+						: p.status;
+				});
+				status.textContent = 'Done.';
+				await refreshSetup();
+			} catch (err) {
+				status.textContent = err.message;
+				for (const b of buttons) {
+					b.disabled = false;
+				}
+			}
+		}));
+
+		const li = step(false, 'No model downloaded yet',
+			SUGGESTED.map(m => `${m.label}: ${m.note}`).join('  '), buttons);
+		li.querySelector('.step-body').append(bar, status);
+		els.setupSteps.appendChild(li);
+	} else if (state.provider) {
+		els.setupSteps.appendChild(step(false, 'No models loaded',
+			`Load one in ${PROVIDERS[state.provider].label}, then press Re-check.`, [button('Re-check', refreshSetup)]));
+	}
+}
+
+els.setupRecheck.addEventListener('click', refreshSetup);
+
+// --- expected output ----------------------------------------------------------
+// A crash is the easy case. Most DSA bugs are wrong answers, and that is the
+// loop that otherwise ends up pasted into a cloud chat over and over.
+
+/** Trailing spaces and a missing final newline are not real differences. */
+function normalise(text) {
+	return String(text ?? '')
+		.replace(/\r\n/g, '\n')
+		.split('\n')
+		.map(l => l.replace(/\s+$/, ''))
+		.join('\n')
+		.trim();
+}
+
+function restoreExpected() {
+	try {
+		const saved = localStorage.getItem('expected') ?? '';
+		els.expect.value = saved;
+		if (saved) {
+			setExpectedOpen(true);
+		}
+	} catch {
+		/* storage disabled; the box simply starts empty */
+	}
+}
+
+function setExpectedOpen(open) {
+	els.expect.hidden = !open;
+	els.expectToggle.setAttribute('aria-expanded', String(open));
+}
+
+els.expectToggle.addEventListener('click', () => {
+	setExpectedOpen(els.expect.hidden);
+	if (!els.expect.hidden) {
+		els.expect.focus();
+	}
+});
+
+els.expect.addEventListener('input', () => {
+	try {
+		localStorage.setItem('expected', els.expect.value);
+	} catch {
+		/* not worth failing a keystroke over */
+	}
+});
+
+function showDiff(expected, got) {
+	els.diffCard.hidden = false;
+	els.card.hidden = true;
+	els.okCard.hidden = true;
+	els.diffWant.textContent = expected || '(nothing)';
+	els.diffGot.textContent = got || '(nothing)';
+	els.diffExplain.innerHTML = '';
+	els.diffMeta.textContent = '';
+}
+
+els.diffAsk.addEventListener('click', () => explain(undefined, 'diff'));

@@ -53,6 +53,35 @@
 
 		<aside class="side">
 			<div class="side-top">
+				<!-- Shown until the machine can actually do the job. -->
+				<section id="setup" class="card setup" hidden>
+					<div class="card-head">
+						<span class="setup-title">Finish setting up</span>
+						<button id="setup-recheck" class="link">re-check</button>
+					</div>
+					<ul id="setup-steps" class="steps"></ul>
+				</section>
+
+				<!-- A wrong answer is not a crash, and needs its own card. -->
+				<section id="diff-card" class="card wrong" hidden>
+					<div class="card-head"><span class="err-type wrong">Wrong answer</span></div>
+					<div class="diff">
+						<div class="diff-col">
+							<span class="diff-label">expected</span>
+							<pre id="diff-want" class="diff-text"></pre>
+						</div>
+						<div class="diff-col">
+							<span class="diff-label">got</span>
+							<pre id="diff-got" class="diff-text bad"></pre>
+						</div>
+					</div>
+					<div id="diff-explain" class="explain"></div>
+					<div class="card-foot">
+						<button id="diff-ask" class="ghost small">Explain again</button>
+						<span id="diff-meta" class="meta"></span>
+					</div>
+				</section>
+
 			<!-- The error card. Not a chat: one problem, pointed at, explained. -->
 			<section id="card" class="card" hidden>
 				<div class="card-head">
@@ -75,6 +104,14 @@
 			</section>
 
 			</div>
+
+			<section class="expect">
+				<button id="expect-toggle" class="expect-head" aria-expanded="false">
+					<span class="chev">&#9656;</span> Expected output <span class="opt">optional</span>
+				</button>
+				<textarea id="expect" class="expect-box" hidden rows="3"
+					placeholder="Paste what the correct answer should print.&#10;Each run is checked against it."></textarea>
+			</section>
 
 			<section class="out-pane">
 				<div class="out-head">Output</div>
