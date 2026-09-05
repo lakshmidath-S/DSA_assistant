@@ -1,6 +1,6 @@
 {
-  "name": "myide-studio",
-  "productName": "myIDE Studio",
+  "name": "myide",
+  "productName": "myIDE",
   "version": "0.1.0",
   "description": "A small Python studio for DSA practice: one file, one Run button, errors pointed at in place.",
   "main": "main.js",

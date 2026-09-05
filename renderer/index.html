@@ -5,7 +5,7 @@
 	<meta charset="utf-8">
 	<meta http-equiv="Content-Security-Policy"
 		content="default-src 'self'; script-src 'self' 'unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; media-src 'self' data: blob:; connect-src http://127.0.0.1:1234 http://127.0.0.1:11434 http://127.0.0.1:8756;">
-	<title>myIDE Studio</title>
+	<title>myIDE</title>
 	<link rel="stylesheet" href="styles.css">
 </head>
 
@@ -38,6 +38,11 @@
 	<main>
 		<section class="editor-pane">
 			<div id="editor"></div>
+			<div id="empty" class="empty" hidden>
+				<p class="empty-title">Write some Python, then press Run.</p>
+				<p class="empty-keys"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> runs it &nbsp;·&nbsp;
+					<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> to ask out loud</p>
+			</div>
 			<div id="voice-overlay" class="voice-overlay" hidden>
 				<canvas id="wave" class="wave"></canvas>
 				<div id="voice-state" class="voice-state">Listening…</div>
@@ -55,7 +60,7 @@
 				<pre id="err-line" class="err-line"></pre>
 				<div id="explain" class="explain"></div>
 				<div class="card-foot">
-					<button id="ask" class="ghost small">Explain this</button>
+					<button id="ask" class="ghost small">Explain again</button>
 					<span id="ai-meta" class="meta"></span>
 				</div>
 			</section>
@@ -63,6 +68,7 @@
 			<section id="ok-card" class="card ok" hidden>
 				<div class="card-head"><span class="err-type ok">Ran cleanly</span></div>
 				<p id="ok-meta" class="hint"></p>
+				<pre id="ok-out" class="err-line" hidden></pre>
 			</section>
 
 			<section class="out-pane">

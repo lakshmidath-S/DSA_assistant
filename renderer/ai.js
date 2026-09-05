@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  myIDE Studio - talking to a local model.
+ *  myIDE - talking to a local model.
  *
  *  Ported from the fork's lmStudioClient/ollamaClient, minus the workbench's
  *  request service: in a renderer we can just use fetch, and both providers

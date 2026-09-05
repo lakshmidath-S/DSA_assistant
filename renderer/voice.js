@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  myIDE Studio - push to talk, with visible state.
+ *  myIDE - push to talk, with visible state.
  *
  *  The old build's voice mode looked broken because nothing on screen changed
  *  while the microphone was open: you held the key, saw nothing, released, and

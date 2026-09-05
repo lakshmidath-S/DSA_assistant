@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  myIDE Studio - the bridge between the renderer and the main process.
+ *  myIDE - the bridge between the renderer and the main process.
  *
  *  contextIsolation is on and nodeIntegration is off, so the renderer cannot
  *  reach Node directly. This is the whole of its privileged surface: run a

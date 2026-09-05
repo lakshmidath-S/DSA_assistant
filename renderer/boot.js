@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  myIDE Studio - Monaco bootstrap.
+ *  myIDE - Monaco bootstrap.
  *
  *  A separate file rather than an inline <script> because the page's CSP is
  *  script-src 'self': an inline block is refused outright, which leaves Monaco
@@ -15,6 +15,13 @@
 
 require.config({ paths: { vs: '../node_modules/monaco-editor/min/vs' } });
 
-require(['vs/editor/editor.main'], () => {
-	window.dispatchEvent(new Event('monaco-ready'));
+/*
+ * A promise rather than an event. This file is a classic script so it runs
+ * during parsing, while app.js is a module and therefore deferred - if Monaco
+ * resolves from a warm cache before app.js executes, a one-shot 'monaco-ready'
+ * event fires with nobody listening and the editor never initialises. The
+ * promise cannot be missed, however the race turns out.
+ */
+window.monacoLoaded = new Promise(resolve => {
+	require(['vs/editor/editor.main'], () => resolve());
 });

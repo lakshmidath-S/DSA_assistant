@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  myIDE Studio - Electron shell.
+ *  myIDE - Electron shell.
  *
  *  One window, one Python file, one Run button. Everything the workbench gave
  *  us for free and then charged us for in complexity - extensions, SCM, a
@@ -46,7 +46,7 @@ function createWindow() {
 		minWidth: 720,
 		minHeight: 480,
 		backgroundColor: '#101014',
-		title: 'myIDE Studio',
+		title: 'myIDE',
 		autoHideMenuBar: true,
 		webPreferences: {
 			preload: path.join(__dirname, 'preload.js'),
@@ -74,6 +74,10 @@ function createWindow() {
 	if (process.env.STUDIO_SHOT) {
 		win.webContents.once('did-finish-load', () => {
 			setTimeout(async () => {
+				if (process.env.STUDIO_EVAL) {
+					const out = await win.webContents.executeJavaScript(process.env.STUDIO_EVAL);
+					console.log(`[eval] ${JSON.stringify(out)}`);
+				}
 				if (process.env.STUDIO_SHOT_RUN) {
 					await win.webContents.executeJavaScript("document.getElementById('run').click()");
 					await new Promise(r => setTimeout(r, Number(process.env.STUDIO_SHOT_RUN)));

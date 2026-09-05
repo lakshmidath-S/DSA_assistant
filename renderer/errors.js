@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  myIDE Studio - reading a Python traceback.
+ *  myIDE - reading a Python traceback.
  *
  *  This is the piece that makes the difference between pointing at a real error
  *  and guessing at one. Python has already done the analysis; it reports the

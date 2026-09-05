@@ -1,4 +1,4 @@
-# myIDE Studio
+# myIDE
 
 A small Python studio for DSA practice. One window, one file, one Run button.
 
@@ -13,20 +13,23 @@ fork          ~4,600 lines of ours,  4,127 workbench .ts files inherited
 this          ~1,500 lines,          0 inherited
 ```
 
-## Run it
+## Install it
 
 ```powershell
 npm install
-npm start
+.\install.ps1     # Desktop + Start menu shortcuts
 ```
+
+Then tap <kbd>Win</kbd> and type "myIDE". `.\install.ps1 -Remove` takes them away
+again, and `npm start` runs it from source without installing anything.
 
 Needs Node and Python on PATH. A model server is optional — everything except
 *Explain this* works without one.
 
 ## What it does
 
-- Opens on the file you last had, or a blank one. No workspace, no project, no
-  folder to choose.
+- Opens on the file you last had, or a blank one with a hint saying what to do.
+  No workspace, no project, no folder to choose.
 - **Run** (or <kbd>Ctrl</kbd>+<kbd>Enter</kbd>) writes the buffer to disk and
   executes it, streaming output as it arrives. A run that is still going after
   15 s is killed, on the assumption it is an infinite loop.
@@ -34,7 +37,8 @@ Needs Node and Python on PATH. A model server is optional — everything except
   row, squiggle under the exact span Python blamed, and the message trailing the
   line. Editing clears it, because the marker describes code that no longer
   exists.
-- **Explain this** asks a local model about the error. Optional.
+- The explanation **arrives on its own** when a run fails — no button to find,
+  no chat to open. *Explain again* re-asks if you want another attempt.
 - Push to talk on <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>, with a live
   waveform so you can see the microphone is actually open.
 
@@ -86,11 +90,23 @@ producing compositor frames and `PrintWindow` comes back blank on GPU-composited
 Chromium:
 
 ```powershell
-$env:STUDIO_SHOT     = 'C:\path\shot.png'   # capture, then keep running
-$env:STUDIO_SHOT_RUN = 3000                 # click Run first, wait this long
-$env:STUDIO_SHOT_ASK = 45000                # then click Explain this
+$env:STUDIO_SHOT      = 'C:\path\shot.png'  # capture, then keep running
+$env:STUDIO_SHOT_RUN  = 3000                # click Run first, wait this long
+$env:STUDIO_SHOT_ASK  = 45000               # then click Explain again
+$env:STUDIO_SHOT_EXIT = 1                   # quit after capturing
+$env:STUDIO_EVAL      = "..."               # run JS in the page first
 npm start
 ```
+
+## One thing worth knowing if you edit boot.js
+
+`boot.js` hands Monaco over as `window.monacoLoaded`, a promise, rather than
+firing a `monaco-ready` event. It has to: `boot.js` is a classic script and runs
+during parsing, while `app.js` is a module and is therefore deferred. When
+Monaco resolves from a warm cache it can finish *before* `app.js` executes, and
+a one-shot event then fires with nobody listening — the window comes up with no
+editor, no hint and no error in the console. A promise cannot be missed however
+the race falls.
 
 ## Not done yet
 

@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  myIDE Studio - wiring.
+ *  myIDE - wiring.
  *
  *  The whole application flow is: edit -> Run -> Python tells us exactly what
  *  broke -> point at it -> optionally have a model explain it. There is no
@@ -13,7 +13,8 @@ import { parseTraceback, describe, hintFor } from './errors.js';
 import { PROVIDERS, listModels, pickDefaultModel, buildPrompt, chat, stripReasoning } from './ai.js';
 import { Voice } from './voice.js';
 
-const STARTER = `# myIDE Studio - Python scratch\n# Ctrl+Enter to run.\n\n\n`;
+/** Blank, deliberately. The empty-state hint carries the guidance instead. */
+const STARTER = '';
 
 const $ = id => document.getElementById(id);
 
@@ -23,6 +24,7 @@ const els = {
 	errType: $('err-type'), errHint: $('err-hint'), errLine: $('err-line'),
 	explain: $('explain'), ask: $('ask'), aiMeta: $('ai-meta'), jump: $('jump'),
 	overlay: $('voice-overlay'), wave: $('wave'), voiceState: $('voice-state'),
+	empty: $('empty'), okOut: $('ok-out'),
 };
 
 let editor;
@@ -34,7 +36,7 @@ const ai = { provider: undefined, model: undefined };
 
 // --- editor -------------------------------------------------------------------
 
-window.addEventListener('monaco-ready', async () => {
+window.monacoLoaded.then(async () => {
 	const info = await window.studio.info();
 	scratchPath = info.scratch;
 
@@ -66,6 +68,7 @@ window.addEventListener('monaco-ready', async () => {
 		renderLineHighlight: 'line',
 		padding: { top: 16, bottom: 16 },
 		automaticLayout: true,
+		wordWrap: 'on',
 		tabSize: 4,
 		insertSpaces: true,
 		smoothScrolling: true,
@@ -89,14 +92,21 @@ window.addEventListener('monaco-ready', async () => {
 		if (decorations.length) {
 			decorations.clear();
 		}
+		updateEmptyState();
 		scheduleSave();
 	});
+	updateEmptyState();
 	editor.onDidChangeCursorPosition(scheduleSave);
 
 	editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, run);
 
 	await detectProvider();
 });
+
+/** The hint is for an empty file only; once there is code it would be in the way. */
+function updateEmptyState() {
+	els.empty.hidden = editor.getValue().trim().length > 0;
+}
 
 // --- session ------------------------------------------------------------------
 
@@ -148,14 +158,14 @@ async function run() {
 
 	els.run.disabled = true;
 	els.stop.hidden = false;
-	els.status.textContent = 'running…';
+	els.status.textContent = 'Running…';
 
 	const code = editor.getValue();
 	const result = await window.studio.run(code);
 
 	els.run.disabled = false;
 	els.stop.hidden = true;
-	els.status.textContent = `${(result.ms / 1000).toFixed(1)}s`;
+	els.status.textContent = `Ran in ${(result.ms / 1000).toFixed(1)}s`;
 
 	lastRun = { ...result, code };
 
@@ -184,14 +194,29 @@ function showError(parsed, code) {
 	}
 
 	lastRun.parsed = parsed;
+
+	// Arrives on its own. The old build made you ask, which is what made it feel
+	// like a chat window rather than part of the editor.
+	if (ai.provider) {
+		explain();
+	}
 }
 
 function showClean(result) {
 	els.okCard.hidden = false;
 	els.card.hidden = true;
-	els.okMeta.textContent = result.timedOut
-		? 'Stopped early — it was still running after 15 seconds.'
-		: `Finished in ${(result.ms / 1000).toFixed(1)}s with exit code ${result.code}.`;
+
+	const printed = (result.stdout ?? '').trim();
+	if (result.timedOut) {
+		els.okMeta.textContent = 'Stopped after 15 seconds — is there a loop that never ends?';
+	} else if (printed) {
+		els.okMeta.textContent = `No errors. It printed this in ${(result.ms / 1000).toFixed(1)}s:`;
+	} else {
+		els.okMeta.textContent = `No errors, and it printed nothing (${(result.ms / 1000).toFixed(1)}s).`;
+	}
+
+	els.okOut.hidden = !printed;
+	els.okOut.textContent = printed.slice(0, 400);
 }
 
 /**
@@ -282,8 +307,11 @@ async function detectProvider() {
 			/* try the next provider */
 		}
 	}
-	els.model.textContent = 'no model server';
+	// No server is a normal state, not an error: running and error-pointing all
+	// work without one. Say so, instead of leaving a dead button.
+	els.model.textContent = 'no model — errors still shown';
 	els.ask.disabled = true;
+	els.ask.title = 'Start LM Studio or Ollama to get explanations';
 }
 
 async function explain(question) {
