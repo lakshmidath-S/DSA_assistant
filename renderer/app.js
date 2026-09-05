@@ -12,6 +12,7 @@
 import { parseTraceback, describe, hintFor } from './errors.js';
 import { PROVIDERS, listModels, pickDefaultModel, buildPrompt, chat, stripReasoning } from './ai.js';
 import { Voice } from './voice.js';
+import { render, escapeHtml } from './markdown.js';
 
 /** Blank, deliberately. The empty-state hint carries the guidance instead. */
 const STARTER = '';
@@ -25,6 +26,7 @@ const els = {
 	explain: $('explain'), ask: $('ask'), aiMeta: $('ai-meta'), jump: $('jump'),
 	overlay: $('voice-overlay'), wave: $('wave'), voiceState: $('voice-state'),
 	empty: $('empty'), okOut: $('ok-out'),
+	splitter: $('splitter'), outEmpty: $('out-empty'),
 };
 
 let editor;
@@ -108,6 +110,43 @@ function updateEmptyState() {
 	els.empty.hidden = editor.getValue().trim().length > 0;
 }
 
+/**
+ * Replaces the absolute path of our scratch file with something a beginner can
+ * read. Python prints the full path on every frame, which is both noise and the
+ * longest thing in the panel.
+ */
+function tidy(text) {
+	if (!text) {
+		return '';
+	}
+	// split/join rather than a RegExp: the path is full of backslashes and brings
+	// a drive-letter colon with it. Escaping all of that into a pattern is a bug
+	// waiting to happen, and there is nothing here a literal cannot do.
+	return text
+		.split(`"${scratchPath}"`).join('your program')
+		.split(scratchPath).join('your program')
+		.replace(/ *File "?your program"?, line (\d+)(?:, in (\S+))?/g,
+			(_m, line, fn) => (fn && fn !== '<module>' ? `  line ${line}, in ${fn}` : `  line ${line}`));
+}
+
+/** Redraws the output panel from the finished run, tidied. */
+function paintOutput(result) {
+	els.out.textContent = '';
+	const out = (result.stdout ?? '').trim();
+	const err = tidy(result.stderr ?? '').trim();
+
+	if (out) {
+		els.out.appendChild(document.createTextNode(err ? `${out}\n\n` : out));
+	}
+	if (err) {
+		const span = document.createElement('span');
+		span.className = 'stderr';
+		span.textContent = err;
+		els.out.appendChild(span);
+	}
+	els.outEmpty.hidden = Boolean(out || err);
+}
+
 // --- session ------------------------------------------------------------------
 
 let saveTimer;
@@ -168,6 +207,7 @@ async function run() {
 	els.status.textContent = `Ran in ${(result.ms / 1000).toFixed(1)}s`;
 
 	lastRun = { ...result, code };
+	paintOutput(result);
 
 	const parsed = parseTraceback(result.stderr, scratchPath || result.file);
 	if (parsed) {
@@ -379,30 +419,6 @@ const SYSTEM = [
 
 els.ask.addEventListener('click', () => explain());
 
-/** Just enough markdown for what the prompt asks the model to produce. */
-function render(md) {
-	const blocks = md.split(/```(?:python|py)?\n?/);
-	return blocks.map((block, i) => {
-		if (i % 2 === 1) {
-			return `<pre><code>${escapeHtml(block.replace(/\n$/, ''))}</code></pre>`;
-		}
-		return block
-			.split(/\n{2,}/)
-			.filter(p => p.trim())
-			.map(p => `<p>${
-				escapeHtml(p.trim())
-					.replace(/`([^`]+)`/g, '<code>$1</code>')
-					.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-					.replace(/\n/g, '<br>')
-			}</p>`)
-			.join('');
-	}).join('');
-}
-
-function escapeHtml(s) {
-	return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-}
-
 // --- voice --------------------------------------------------------------------
 
 const LABELS = {
@@ -479,3 +495,82 @@ window.addEventListener('keyup', e => {
 		}
 	}
 });
+
+// --- resizing and zoom ---------------------------------------------------------
+
+/*
+ * A draggable split rather than a fixed 400px: a long explanation wants a wide
+ * panel, editing wants a wide editor, and which you want changes minute to
+ * minute. The width is remembered per viewer.
+ */
+(() => {
+	const saved = Number(localStorage.getItem('sideWidth'));
+	if (saved >= 260 && saved <= 900) {
+		document.documentElement.style.setProperty('--side-w', `${saved}px`);
+	}
+
+	let dragging = false;
+	els.splitter.addEventListener('mousedown', e => {
+		dragging = true;
+		els.splitter.classList.add('dragging');
+		// Stops the editor stealing the drag as a text selection.
+		e.preventDefault();
+	});
+
+	window.addEventListener('mousemove', e => {
+		if (!dragging) {
+			return;
+		}
+		const width = Math.min(900, Math.max(260, window.innerWidth - e.clientX));
+		document.documentElement.style.setProperty('--side-w', `${width}px`);
+	});
+
+	window.addEventListener('mouseup', () => {
+		if (!dragging) {
+			return;
+		}
+		dragging = false;
+		els.splitter.classList.remove('dragging');
+		const w = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--side-w'), 10);
+		try {
+			localStorage.setItem('sideWidth', String(w));
+		} catch {
+			/* private window, or storage disabled - the width just will not persist */
+		}
+	});
+})();
+
+/** Ctrl +/- changes the editor font, as it does in every other editor. */
+(() => {
+	const FONT_MIN = 10;
+	const FONT_MAX = 28;
+	let size = Number(localStorage.getItem('fontSize')) || 14;
+
+	function apply(next) {
+		size = Math.min(FONT_MAX, Math.max(FONT_MIN, next));
+		editor?.updateOptions({ fontSize: size, lineHeight: Math.round(size * 1.6) });
+		try {
+			localStorage.setItem('fontSize', String(size));
+		} catch {
+			/* not worth failing a keystroke over */
+		}
+	}
+
+	window.addEventListener('keydown', e => {
+		if (!e.ctrlKey) {
+			return;
+		}
+		if (e.key === '=' || e.key === '+') {
+			e.preventDefault();
+			apply(size + 1);
+		} else if (e.key === '-') {
+			e.preventDefault();
+			apply(size - 1);
+		} else if (e.key === '0') {
+			e.preventDefault();
+			apply(14);
+		}
+	});
+
+	window.monacoLoaded.then(() => apply(size));
+})();

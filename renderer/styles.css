@@ -159,14 +159,25 @@ button svg {
 
 main {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) 400px;
+	/* --side-w is moved by the splitter and remembered across restarts. */
+	grid-template-columns: minmax(0, 1fr) 5px var(--side-w, 400px);
 	height: calc(100% - 46px);
+}
+
+.splitter {
+	cursor: col-resize;
+	background: var(--line);
+	transition: background 120ms ease;
+}
+
+.splitter:hover,
+.splitter.dragging {
+	background: var(--accent);
 }
 
 .editor-pane {
 	position: relative;
 	min-width: 0;
-	border-right: 1px solid var(--line);
 }
 
 #editor {
@@ -179,6 +190,22 @@ main {
 	flex-direction: column;
 	min-height: 0;
 	background: var(--bg-raised);
+}
+
+/*
+ * The explanation can run long - models overshoot the word limit they are given.
+ * Letting it scroll here keeps Output on screen instead of being pushed off the
+ * bottom, which is what happened when the whole column was one flow.
+ */
+.side-top {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+}
+
+.out-pane {
+	flex: 0 0 38%;
+	min-height: 140px;
 }
 
 /* --- the error card ------------------------------------------------------ */
@@ -478,4 +505,16 @@ kbd {
 	border-radius: 4px;
 	background: #16161c;
 	color: var(--text-dim);
+}
+
+.out-empty {
+	margin: 0;
+	padding: 0 14px 14px;
+	color: var(--text-faint);
+	font-size: 12px;
+}
+
+/* The path of our own scratch file is noise; the run marker replaces it. */
+.out .where {
+	color: var(--text-faint);
 }

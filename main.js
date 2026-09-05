@@ -52,14 +52,25 @@ function createWindow() {
 			preload: path.join(__dirname, 'preload.js'),
 			contextIsolation: true,
 			nodeIntegration: false,
-			sandbox: false,
+			// The preload uses only ipcRenderer and contextBridge, both of which
+			// work sandboxed - so there is no reason to leave Node reachable
+			// from a renderer that displays model output.
+			sandbox: true,
+			webSecurity: true,
+			allowRunningInsecureContent: false,
+			experimentalFeatures: false,
 		},
 	});
 
 	// Renderer problems are otherwise invisible: a failed stylesheet or a thrown
 	// module leaves a blank window and nothing on the terminal.
-	win.webContents.on('console-message', (_e, level, message, line, source) => {
-		console.log(`[renderer:${level}] ${message} (${source}:${line})`);
+	win.webContents.on('console-message', (...args) => {
+		// Electron 35 replaced the positional (event, level, message, line,
+		// source) signature with a single details object; accept either.
+		const d = args.length === 1 || (args[1] && typeof args[1] === 'object')
+			? (args.length === 1 ? args[0] : args[1])
+			: { level: args[1], message: args[2], lineNumber: args[3], sourceId: args[4] };
+		console.log(`[renderer:${d.level}] ${d.message} (${d.sourceId}:${d.lineNumber})`);
 	});
 	win.webContents.on('did-fail-load', (_e, code, desc, url) => {
 		console.log(`[did-fail-load] ${code} ${desc} ${url}`);
@@ -71,7 +82,7 @@ function createWindow() {
 	// STUDIO_SHOT=<path> captures the rendered page once and exits. Used to
 	// verify the UI without a human at the keyboard; capturePage goes through
 	// the compositor, unlike PrintWindow which comes back blank on GPU windows.
-	if (process.env.STUDIO_SHOT) {
+	if (process.env.STUDIO_SHOT && !app.isPackaged) {
 		win.webContents.once('did-finish-load', () => {
 			setTimeout(async () => {
 				if (process.env.STUDIO_EVAL) {
@@ -98,6 +109,18 @@ function createWindow() {
 			}, Number(process.env.STUDIO_SHOT_DELAY ?? 2500));
 		});
 	}
+
+	// This window only ever shows its own local page. Anything that tries to
+	// navigate it or spawn a second window is refused: a renderer that has been
+	// talked into loading a remote origin would carry the preload bridge with it.
+	win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+	win.webContents.on('will-navigate', (event, url) => {
+		if (url !== win.webContents.getURL()) {
+			event.preventDefault();
+			console.log(`[blocked navigation] ${url}`);
+		}
+	});
+	win.webContents.on('will-attach-webview', event => event.preventDefault());
 
 	win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 	win.on('closed', () => { win = null; });

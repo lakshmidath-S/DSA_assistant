@@ -41,6 +41,11 @@ Needs Node and Python on PATH. A model server is optional — everything except
   no chat to open. *Explain again* re-asks if you want another attempt.
 - Push to talk on <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>, with a live
   waveform so you can see the microphone is actually open.
+- Drag the divider to resize, <kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>-</kbd> to
+  change the font. Both are remembered.
+- Output shows what your program printed, then the traceback with our scratch
+  path stripped out: `line 9` rather than seventy characters of
+  `C:\Users\...\session\main.py`.
 
 ## Why the answers got better
 
@@ -69,6 +74,37 @@ hangs off it. Two things about real tracebacks are easy to get wrong:
   every indented line underlines the wrong span, which in DSA code is most of
   them.
 
+## Security
+
+```powershell
+npm test     # traceback parsing + XSS payloads against the answer renderer
+npm audit    # dependencies
+```
+
+Electron runs locked down: `contextIsolation` on, `nodeIntegration` off,
+`sandbox` **on**, and a CSP that allows connections only to the three loopback
+ports the app actually uses. Navigation away from the local page, popups and
+`<webview>` are all refused outright - a renderer that displays model output and
+could then be navigated to a remote origin would carry the preload bridge with
+it. The screenshot hooks below execute JavaScript from the environment, so they
+are disabled whenever `app.isPackaged` is true.
+
+`'unsafe-eval'` stays in the CSP because Monaco's AMD loader compiles modules
+with the `Function` constructor. Removing it means switching to Monaco's ESM
+build behind a bundler, which is a bigger change than it sounds.
+
+Model output is the only untrusted text that reaches `innerHTML` - it is shaped
+by the traceback, which is shaped by whatever was pasted into the editor. It goes
+through `markdown.js`, which escapes first and adds its handful of tags
+afterwards, to text that can no longer contain markup. `test/markdown.test.mjs`
+fires fifteen payloads at it and asserts on the tags that actually survive
+parsing, rather than grepping the output for scary substrings - escaped text may
+legitimately read `&lt;img onerror=...&gt;` and renders as harmless characters.
+
+Running arbitrary Python is the entire point of the app, so that is not a
+finding; the 15-second timeout and the process-tree kill exist to stop a runaway
+loop, not a hostile one.
+
 ## Layout
 
 ```
@@ -76,11 +112,13 @@ main.js              Electron shell: spawns Python, owns the scratch file and se
 preload.js           the renderer's entire privileged surface
 renderer/
   boot.js            Monaco's AMD bootstrap (a separate file - CSP forbids inline)
+  markdown.js        escaping + the little markdown the model is asked for
   app.js             wiring: run, decorations, model, voice
   errors.js          traceback -> file, line, marked span
   ai.js              LM Studio / Ollama streaming + the prompt
   voice.js           push to talk, waveform, explicit states
 servers/             voice_server.py  (speech, carried over unchanged)
+test/                traceback cases run through real Python; XSS payloads
 ```
 
 ## Verifying the UI
