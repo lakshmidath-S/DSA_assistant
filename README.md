@@ -10,6 +10,13 @@ Explaining one traceback, or one wrong answer, is a small bounded job — small
 enough that a 1.5B model on your own hardware can do it, and not worth spending
 cloud usage on.
 
+**It does not give you the answer.** The model's job here is to make you
+understand your own mistake, so the next one is easier to spot. It names the
+line, explains what the code actually does as against what you meant, and ends
+with a question. It never writes the corrected code. When you have genuinely
+looked and are stuck, *Show the fix* is there — deliberately as a second,
+quieter button rather than the default.
+
 ## What it does
 
 - Opens blank, or on the file you had last.
@@ -20,7 +27,9 @@ cloud usage on.
   the mark.
 - When it **runs but prints the wrong thing**, you get an expected-vs-got card
   instead. Fill in *Expected output* and every run is checked against it.
-- Either way a local model explains it, unprompted. *Explain again* re-asks.
+- Either way a local model explains it, unprompted — what went wrong and why,
+  never the corrected code. *Explain again* re-asks; *Show the fix* gives the
+  corrected line when you want it.
 - Push to talk on <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>, with a live
   waveform (needs the speech server, below).
 - Drag the divider to resize; <kbd>Ctrl</kbd>+<kbd>+</kbd>/<kbd>-</kbd> for font
@@ -70,7 +79,7 @@ not the file index, so a Desktop-only shortcut never turns up when you type.
 8756. It needs `pip install -r servers/requirements.txt` (faster-whisper and
 piper-tts) and downloads its own models on first use. The app works without it.
 
-## Why it does not ask the model to find the bug
+## Why it teaches instead of answering
 
 Python already knows what went wrong, exactly, and says so for free. So
 `errors.js` parses the traceback for the file, line and marked column, and the
@@ -82,12 +91,24 @@ stopping at a breakpoint, handed it source only. Asked to explain a failure it
 could not see, it invented one — reporting a missing colon in a conditional
 expression that is valid Python, then "fixing" it by adding whitespace.
 
-The same reasoning shapes the wrong-answer prompt. It states that the expected
-output and the test input are correct and must not change, because without that
-the model edits the test to match the bug: `qwen2.5-coder:7b` suggested changing
-`two_sum([2, 7, 11, 15], 9)` to `two_sum([7, 2, 11, 15], 9)` rather than fixing
-the line that returned the indices in the wrong order. With the instruction
-added it named line 6 and gave the corrected line.
+The same reasoning shapes the wrong-answer prompt, twice over.
+
+It states that the expected output and the test input are correct and must not
+change, because without that the model edits the test to match the bug:
+`qwen2.5-coder:7b` suggested changing `two_sum([2, 7, 11, 15], 9)` to
+`two_sum([7, 2, 11, 15], 9)` rather than looking at the line that returned the
+indices in the wrong order.
+
+It also has to say which line counts. Asked simply to name where the two
+diverge, the same model blamed line 4 (`need = target - n`), which is correct
+code — the wrong value is produced by the `return` on line 6. Told to name the
+line that *produces* the value rather than one merely involved in the working,
+it named line 6.
+
+Neither instruction makes a small model reliable. In the same answer it traced
+the loop correctly and then wrote that the result "translates to `[3, 0]`" when
+it had just derived `[1, 0]`. Read it as a study partner thinking aloud, not as
+an authority.
 
 Two details of real tracebacks are easy to get wrong, and both are covered:
 
@@ -182,11 +203,12 @@ and nothing in the console. A promise cannot be missed.
 ## What has and has not been exercised
 
 Verified by running it, on Windows: traceback marking and explanation; the
-wrong-answer card and its explanation; session save and restore; the setup
-checklist rendering with both model servers made unreachable; **Start Ollama**
-(the process survives the app closing and the port comes up); and the
-model-download stream, by re-pulling a model that was already present, which
-returns the same NDJSON frames as a first download.
+wrong-answer card and its explanation; that the default answer explains without
+writing the fix, and that *Show the fix* then returns the corrected line;
+session save and restore; the setup checklist rendering with both model servers
+made unreachable; **Start Ollama** (the process survives the app closing and the
+port comes up); and the model-download stream, by re-pulling a model that was
+already present, which returns the same NDJSON frames as a first download.
 
 Not exercised: a first-time download of a model that is not already on disk;
 voice end to end, which needs a microphone and a person; and macOS and Linux,

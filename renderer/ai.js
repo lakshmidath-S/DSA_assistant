@@ -14,6 +14,10 @@
  *  So: we never ask the model to find the bug. Python has already found it. We
  *  give it the traceback and ask it to explain that, which small models do
  *  well.
+ *
+ *  And we never ask it for the fix. The app exists to make its reader better at
+ *  DSA, and being handed a corrected line skips the part that does that. The
+ *  answer is available behind a button; it is not the default.
  *  Licensed under the MIT License.
  *--------------------------------------------------------------------------------------------*/
 
@@ -63,18 +67,53 @@ export async function listModels(provider) {
 	return (json.data ?? []).map(m => m.id);
 }
 
+/*
+ * The teaching prompt, and the default.
+ *
+ * The point of this app is to get better at DSA, not to receive working
+ * solutions faster. Handing over a corrected line removes the one part that
+ * actually builds skill - working out why your own reasoning was wrong - and a
+ * model will do exactly that unless told not to, because "give the minimal fix"
+ * is what these prompts usually ask for.
+ *
+ * So: explain the mistake, never write the fix. The escape hatch is explicit
+ * (SYSTEM_PROMPT_REVEAL, behind a button) rather than being the default, so
+ * seeing the answer stays a decision instead of a habit.
+ */
 export const SYSTEM_PROMPT = [
-	'You explain Python errors to someone learning data structures and algorithms.',
+	'You are a tutor sitting next to someone learning data structures and algorithms.',
+	'',
+	'Your job is to make them understand their own mistake so they can fix it',
+	'themselves. You are NOT here to hand them a working solution.',
 	'',
 	'You are given either the exact traceback Python produced, or the expected and',
-	'actual output of a run. Explain THAT, and nothing else - do not go looking',
-	'for other problems, and never claim an error other than the one you are given.',
+	'actual output of a run. Work only from that. Never claim a different failure,',
+	'and do not go looking for other problems.',
 	'',
 	'Rules:',
-	'- Explain what went wrong in one or two plain sentences. No jargon.',
-	'- Say WHY it happened, referring to the actual line you were given.',
-	'- Then give the minimal fix as a short code snippet.',
-	'- Under 120 words. No preamble, no restating the question, no pleasantries.',
+	'- Say what is happening in plain language, and name the line it happens on.',
+	'- Explain WHY the code does that: the assumption or idea that does not hold.',
+	'  This is the part that matters - spend most of your words here.',
+	'- NEVER write the corrected code. No fixed line, no rewritten function, no',
+	'  "change X to Y", not even as an example. Describe the problem, not the edit.',
+	'- Finish with one specific question that points them at the fix.',
+	'- Under 120 words. No preamble, no praise, no restating the question.',
+].join('\n');
+
+/**
+ * Used only when the reader presses "Show the fix". Kept deliberately separate
+ * so the default answer can never drift back into handing over the solution.
+ */
+export const SYSTEM_PROMPT_REVEAL = [
+	'You are helping someone learning data structures and algorithms who has',
+	'looked at the problem and asked to be shown the fix.',
+	'',
+	'Work only from the traceback, or the expected and actual output, you are given.',
+	'',
+	'Rules:',
+	'- Give the corrected line or lines, and nothing more of the solution.',
+	'- Follow it with one sentence on why the original was wrong.',
+	'- Under 80 words. No preamble.',
 ].join('\n');
 
 /**
@@ -115,10 +154,13 @@ export function buildPrompt({ code, parsed, stdout, expected, question }) {
 			'EXPECTED:', '```', expected, '```', '',
 			'ACTUALLY PRINTED:', '```', (stdout ?? '').trim() || '(nothing)', '```', '',
 			'SOURCE:', '```python', numbered, '```', '',
-			'The expected output and the test input are both CORRECT and must not change.',
-			'The bug is in the logic. Name the single line number that produces the',
-			'difference and give the corrected version of that line - do not rewrite',
-			'the whole solution, and never change the input to match the wrong output.',
+			'The expected output and the test input are both CORRECT. The bug is in the',
+			'logic, so never suggest changing the input or the expected value to match',
+			'what was printed.',
+			'Name the line that actually PRODUCES the wrong value - usually the one',
+			'that returns or prints it - not merely a line involved in the working.',
+			'Trace the real values through the loop to show how that line ends up',
+			'with what was printed.',
 		);
 	} else {
 		parts.push(
@@ -136,9 +178,9 @@ export function buildPrompt({ code, parsed, stdout, expected, question }) {
 	}
 
 	const fallback = parsed
-		? 'Explain this error and how to fix it.'
+		? 'What is going wrong here, and why?'
 		: expected !== undefined
-			? 'Why is the output different, and what is the smallest fix?'
+			? 'Why is the output different from what I expected?'
 			: 'Is this output correct?';
 	parts.push(question || fallback);
 	return parts.join('\n');

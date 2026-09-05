@@ -11,7 +11,8 @@
 
 import { parseTraceback, describe, hintFor } from './errors.js';
 import {
-	PROVIDERS, listModels, pickDefaultModel, buildPrompt, chat, stripReasoning, SYSTEM_PROMPT,
+	PROVIDERS, listModels, pickDefaultModel, buildPrompt, chat, stripReasoning,
+	SYSTEM_PROMPT, SYSTEM_PROMPT_REVEAL,
 } from './ai.js';
 import { Voice } from './voice.js';
 import { render, escapeHtml } from './markdown.js';
@@ -34,6 +35,7 @@ const els = {
 	diffCard: $('diff-card'), diffWant: $('diff-want'), diffGot: $('diff-got'),
 	diffExplain: $('diff-explain'), diffAsk: $('diff-ask'), diffMeta: $('diff-meta'),
 	expect: $('expect'), expectToggle: $('expect-toggle'),
+	reveal: $('reveal'), diffReveal: $('diff-reveal'),
 };
 
 let editor;
@@ -376,8 +378,9 @@ els.jump.addEventListener('click', () => {
 /**
  * @param {string} [question] Free text, e.g. something said out loud.
  * @param {'error'|'diff'} [target] Which card the answer belongs in.
+ * @param {boolean} [reveal] Show the fix outright, rather than teaching.
  */
-async function explain(question, target = 'error') {
+async function explain(question, target = 'error', reveal = false) {
 	if (!ai.provider || !lastRun) {
 		return;
 	}
@@ -387,9 +390,11 @@ async function explain(question, target = 'error') {
 	const out = target === 'diff' ? els.diffExplain : els.explain;
 	const meta = target === 'diff' ? els.diffMeta : els.aiMeta;
 	const askBtn = target === 'diff' ? els.diffAsk : els.ask;
+	const revealBtn = target === 'diff' ? els.diffReveal : els.reveal;
 
 	out.innerHTML = '<span class="caret"></span>';
 	askBtn.disabled = true;
+	revealBtn.disabled = true;
 	const started = Date.now();
 	let text = '';
 
@@ -399,7 +404,7 @@ async function explain(question, target = 'error') {
 			model: ai.model,
 			signal: aiAbort.signal,
 			messages: [
-				{ role: 'system', content: SYSTEM_PROMPT },
+				{ role: 'system', content: reveal ? SYSTEM_PROMPT_REVEAL : SYSTEM_PROMPT },
 				{
 					role: 'user',
 					content: buildPrompt({
@@ -425,11 +430,14 @@ async function explain(question, target = 'error') {
 		}
 	} finally {
 		askBtn.disabled = false;
+		revealBtn.disabled = false;
 	}
 	return text;
 }
 
 els.ask.addEventListener('click', () => explain());
+els.reveal.addEventListener('click', () => explain(undefined, 'error', true));
+els.diffReveal.addEventListener('click', () => explain(undefined, 'diff', true));
 
 // --- voice --------------------------------------------------------------------
 
@@ -602,11 +610,15 @@ async function refreshSetup() {
 		els.model.textContent = `${PROVIDERS[ai.provider].label} · ${ai.model}`;
 		els.ask.disabled = false;
 		els.diffAsk.disabled = false;
+		els.reveal.disabled = false;
+		els.diffReveal.disabled = false;
 	} else {
 		ai.provider = undefined;
 		els.model.textContent = 'no model yet';
 		els.ask.disabled = true;
 		els.diffAsk.disabled = true;
+		els.reveal.disabled = true;
+		els.diffReveal.disabled = true;
 	}
 
 	renderSetup(setupState);

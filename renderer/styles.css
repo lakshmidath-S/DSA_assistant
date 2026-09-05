@@ -343,8 +343,20 @@ main {
 .card-foot {
 	display: flex;
 	align-items: center;
-	gap: 10px;
+	flex-wrap: wrap;
+	gap: 8px;
 	margin-top: 10px;
+}
+
+/* Button labels are two or three words; wrapping them mid-phrase looks broken. */
+.card-foot button {
+	white-space: nowrap;
+	flex: 0 0 auto;
+}
+
+.card-foot .meta {
+	flex: 1 1 100%;
+	order: 3;
 }
 
 .meta {
@@ -709,4 +721,19 @@ kbd {
 .expect-box:focus {
 	outline: none;
 	border-color: var(--accent);
+}
+
+/*
+ * Deliberately the quieter of the two: understanding the mistake is the point,
+ * and seeing the answer should feel like a decision rather than the obvious
+ * next click.
+ */
+.ghost.quiet {
+	border-color: transparent;
+	color: var(--text-faint);
+}
+
+.ghost.quiet:hover {
+	border-color: var(--line);
+	color: var(--text-dim);
 }
