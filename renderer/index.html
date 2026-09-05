@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8">
+	<meta http-equiv="Content-Security-Policy"
+		content="default-src 'self'; script-src 'self' 'unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; media-src 'self' data: blob:; connect-src http://127.0.0.1:1234 http://127.0.0.1:11434 http://127.0.0.1:8756;">
+	<title>myIDE Studio</title>
+	<link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+	<header class="bar">
+		<span class="mark">myIDE</span>
+
+		<button id="run" class="run" title="Run (Ctrl+Enter)">
+			<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" /></svg>
+			<span>Run</span>
+		</button>
+		<button id="stop" class="ghost" hidden title="Stop">
+			<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1" /></svg>
+		</button>
+
+		<span id="status" class="status"></span>
+
+		<span class="spacer"></span>
+
+		<button id="mic" class="ghost mic" title="Hold to talk (Ctrl+Alt+V)">
+			<svg viewBox="0 0 16 16" aria-hidden="true">
+				<path d="M8 10a2.5 2.5 0 0 0 2.5-2.5v-3a2.5 2.5 0 0 0-5 0v3A2.5 2.5 0 0 0 8 10z" />
+				<path d="M4 7.5a4 4 0 0 0 8 0" fill="none" stroke="currentColor" stroke-width="1.2" />
+				<path d="M8 11.5V14" fill="none" stroke="currentColor" stroke-width="1.2" />
+			</svg>
+		</button>
+		<span id="model" class="model" title="Model"></span>
+	</header>
+
+	<main>
+		<section class="editor-pane">
+			<div id="editor"></div>
+			<div id="voice-overlay" class="voice-overlay" hidden>
+				<canvas id="wave" class="wave"></canvas>
+				<div id="voice-state" class="voice-state">Listening…</div>
+			</div>
+		</section>
+
+		<aside class="side">
+			<!-- The error card. Not a chat: one problem, pointed at, explained. -->
+			<section id="card" class="card" hidden>
+				<div class="card-head">
+					<span id="err-type" class="err-type"></span>
+					<button id="jump" class="link">go to line</button>
+				</div>
+				<p id="err-hint" class="hint"></p>
+				<pre id="err-line" class="err-line"></pre>
+				<div id="explain" class="explain"></div>
+				<div class="card-foot">
+					<button id="ask" class="ghost small">Explain this</button>
+					<span id="ai-meta" class="meta"></span>
+				</div>
+			</section>
+
+			<section id="ok-card" class="card ok" hidden>
+				<div class="card-head"><span class="err-type ok">Ran cleanly</span></div>
+				<p id="ok-meta" class="hint"></p>
+			</section>
+
+			<section class="out-pane">
+				<div class="out-head">Output</div>
+				<pre id="out" class="out"></pre>
+			</section>
+		</aside>
+	</main>
+
+	<!-- Monaco ships an AMD bundle; load it first, then the app as a module. -->
+	<script src="../node_modules/monaco-editor/min/vs/loader.js"></script>
+	<script src="boot.js"></script>
+	<script type="module" src="app.js"></script>
+</body>
+
+</html>
