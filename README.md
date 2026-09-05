@@ -279,6 +279,10 @@ not been run.
 
 ## Not done yet
 
+The plan, and the notes needed to pick it up cold, are in **[NEXT.md](NEXT.md)**.
+
+### Known gaps
+
 - **Values only at a crash.** A run that finishes but prints the wrong answer
   gets no recorded variables, because nothing raised. Capturing those needs
   tracing rather than an exception handler, which is the same machinery a
