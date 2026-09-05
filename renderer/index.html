@@ -105,7 +105,28 @@
 				<pre id="ok-out" class="err-line" hidden></pre>
 			</section>
 
+				<div id="thread" class="thread"></div>
 			</div>
+
+			<!-- Ask bar. Not a chat transcript: a question box that knows what you
+			     have selected, plus the two questions worth a dedicated button. -->
+			<section class="ask-bar">
+				<div id="sel-chip" class="sel-chip" hidden>
+					<span class="sel-label">about</span>
+					<code id="sel-text"></code>
+					<button id="sel-clear" class="sel-x" title="Ask about the whole file instead">&times;</button>
+				</div>
+				<div class="ask-row">
+					<input id="ask-input" class="ask-input" type="text"
+						placeholder="Ask about your code…  (select part of it first to narrow the question)">
+					<button id="ask-send" class="ghost small" title="Ask (Enter)">Ask</button>
+				</div>
+				<div class="ask-quick">
+					<button id="ask-complexity" class="ghost small">Time &amp; space</button>
+					<button id="ask-optimise" class="ghost small">Can it be faster?</button>
+					<button id="thread-clear" class="link">clear</button>
+				</div>
+			</section>
 
 			<section class="expect">
 				<button id="expect-toggle" class="expect-head" aria-expanded="false">

@@ -266,3 +266,98 @@ export async function chat({ provider, model, messages, signal }, onToken) {
 
 	return full;
 }
+
+/*
+ * Follow-up prompts.
+ *
+ * Asking a second question is not the same as the first answer arriving, so
+ * these are separate. They keep the same rule - explain, do not hand over a
+ * solution - with two deliberate exceptions:
+ *
+ *   Complexity IS the lesson. Saying "O(n) because the loop visits each element
+ *   once" teaches the thing being asked about, so it is answered directly.
+ *
+ *   Optimisation names the technique and why it removes the cost, but stops
+ *   short of writing the faster solution. Knowing that a hash map turns the
+ *   inner scan into a lookup is the insight; typing it is the exercise.
+ */
+
+export const SYSTEM_PROMPT_ASK = [
+	'You are a tutor sitting next to someone learning data structures and algorithms.',
+	'They are asking a follow-up question about their own code.',
+	'',
+	'Rules:',
+	'- Answer the question they actually asked, directly, in plain language.',
+	'- Ground it in their code: quote the line or the values involved.',
+	'- If they are wrong about something, say so and explain why.',
+	'- Do NOT write a corrected or complete solution unless they explicitly ask',
+	'  to be shown the fix. Explaining is the job.',
+	'- Under 120 words. No preamble, no praise.',
+].join('\n');
+
+export const SYSTEM_PROMPT_COMPLEXITY = [
+	'You analyse the time and space complexity of a Python solution for someone',
+	'learning data structures and algorithms.',
+	'',
+	'Rules:',
+	'- Give the time complexity and the space complexity, in big-O.',
+	'- Justify each one: which loop or recursion causes it, which structure holds',
+	'  the memory, and say what n refers to in THEIR code.',
+	'- Name the dominant term and say why the smaller ones drop out.',
+	'- If a bound is amortised or average-case rather than worst-case, say so -',
+	'  dictionary lookups being the usual example.',
+	'- Count only their code, not the interpreter.',
+	'- Under 140 words. No preamble.',
+].join('\n');
+
+export const SYSTEM_PROMPT_OPTIMISE = [
+	'You help someone learning data structures and algorithms see how their own',
+	'solution could be faster or use less memory.',
+	'',
+	'Rules:',
+	'- Start with the complexity they have now, and the best achievable for this',
+	'  problem. If those are the same, say it is already optimal and stop.',
+	'- Name the technique that closes the gap - a hash map for lookup, two',
+	'  pointers, a prefix sum, binary search, memoisation - and explain WHY it',
+	'  removes the cost, in terms of the work their current code repeats.',
+	'- Do NOT write the optimised code. The idea is the lesson; typing it is the',
+	'  exercise.',
+	'- Under 140 words. No preamble.',
+].join('\n');
+
+/**
+ * A follow-up question, optionally about a selected fragment.
+ *
+ * The selection is what makes this useful: "why is this O(n^2)" means nothing
+ * without knowing which part "this" is.
+ */
+export function buildAskPrompt({ code, selection, question, parsed, expected, stdout }) {
+	const parts = [];
+
+	const numbered = code.split('\n')
+		.map((l, i) => `${String(i + 1).padStart(4)}  ${l}`)
+		.join('\n');
+	parts.push('THEIR CODE:', '```python', numbered, '```', '');
+
+	if (selection && selection.trim()) {
+		parts.push(
+			'THEY HAVE SELECTED THIS PART, AND THE QUESTION IS ABOUT IT:',
+			'```', selection.trim(), '```', '',
+		);
+	}
+
+	// Whatever the last run showed is still the context they are sitting in.
+	if (parsed) {
+		parts.push('THE LAST RUN FAILED WITH:', '```', parsed.raw, '```', '');
+	} else if (expected !== undefined) {
+		parts.push(
+			`THE LAST RUN PRINTED ${JSON.stringify((stdout ?? '').trim())}`,
+			`BUT ${JSON.stringify(expected)} WAS EXPECTED.`, '',
+		);
+	} else if (stdout && stdout.trim()) {
+		parts.push('THE LAST RUN PRINTED:', '```', stdout.trim().slice(0, 1000), '```', '');
+	}
+
+	parts.push(question);
+	return parts.join('\n');
+}

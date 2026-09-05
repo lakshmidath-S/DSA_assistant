@@ -30,6 +30,16 @@ quieter button rather than the default.
 - Either way a local model explains it, unprompted — what went wrong and why,
   never the corrected code. *Explain again* re-asks; *Show the fix* gives the
   corrected line when you want it.
+- **Ask follow-ups.** The box at the bottom of the panel takes any question
+  about your code, and remembers the last few exchanges, so a bare "why?" still
+  has a subject. Answers stack as notes, not as a chat transcript.
+- **Select first to narrow the question.** Highlight part of your code — or part
+  of an answer — and a chip appears showing what the question is about. "Why is
+  this O(n²)?" needs to know which part *this* is.
+- **Time & space** analyses complexity: both bounds, what `n` refers to in your
+  code, which loop causes what, and whether a bound is amortised.
+- **Can it be faster?** gives your current complexity and the best achievable,
+  then names the technique that closes the gap and why it removes the cost.
 - Push to talk on <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>, with a live
   waveform (needs the speech server, below).
 - Drag the divider to resize; <kbd>Ctrl</kbd>+<kbd>+</kbd>/<kbd>-</kbd> for font
@@ -110,6 +120,18 @@ the loop correctly and then wrote that the result "translates to `[3, 0]`" when
 it had just derived `[1, 0]`. Read it as a study partner thinking aloud, not as
 an authority.
 
+The follow-up prompts keep the same rule, with two deliberate exceptions.
+
+Complexity **is** the lesson: "O(n²) because the inner loop runs n − i times for
+each of n outer passes" teaches exactly the thing being asked about, so it is
+answered directly.
+
+Optimisation names the technique and why it works — a hash map turning a repeated
+scan into a lookup — but stops before writing the faster solution. Knowing which
+idea applies is the insight; typing it is the exercise. Asked about an O(n²)
+`two_sum`, `qwen2.5-coder:7b` named the hash map and explained that it removes
+the repeated pair checking, without producing the rewritten function.
+
 Two details of real tracebacks are easy to get wrong, and both are covered:
 
 - Since 3.11 the marker line mixes `~` and `^` (`return 1 / 0` → `~~^~~`), so
@@ -136,6 +158,12 @@ environment, so they are disabled when `app.isPackaged` is true.
 `'unsafe-eval'` remains because Monaco's AMD loader compiles modules with the
 `Function` constructor. Removing it means Monaco's ESM build behind a bundler.
 
+Answers are also stripped of LaTeX delimiters before rendering — models write
+complexity as `\(O(n^2)\)` and nothing here renders maths, so the backslashes
+would otherwise appear literally in every complexity answer. That happens before
+escaping, so it cannot be used to smuggle markup through, and there is a test
+for exactly that.
+
 Model output is the only untrusted text reaching `innerHTML` — it is shaped by
 the traceback, which is shaped by whatever you pasted. `markdown.js` escapes
 first and adds its few tags afterwards, to text that can no longer contain
@@ -153,9 +181,10 @@ main.js              Electron shell: finds Python, runs it, owns the scratch fil
 preload.js           the renderer's entire privileged surface
 renderer/
   boot.js            Monaco's AMD bootstrap (separate file - CSP forbids inline)
-  app.js             wiring: run, decorations, setup panel, expected output, voice
+  app.js             wiring: run, decorations, setup panel, expected output,
+                     follow-up thread, selection tracking, voice
   errors.js          traceback -> file, line, marked span
-  ai.js              LM Studio / Ollama streaming, and the prompts
+  ai.js              LM Studio / Ollama streaming, and all five prompts
   markdown.js        escaping + the little markdown the model is asked for
   setup.js           what this machine has; starting Ollama; downloading a model
   voice.js           push to talk, waveform, explicit states
@@ -205,8 +234,10 @@ and nothing in the console. A promise cannot be missed.
 Verified by running it, on Windows: traceback marking and explanation; the
 wrong-answer card and its explanation; that the default answer explains without
 writing the fix, and that *Show the fix* then returns the corrected line;
-session save and restore; the setup checklist rendering with both model servers
-made unreachable; **Start Ollama** (the process survives the app closing and the
+session save and restore; asking a follow-up and having a bare "why does that
+make it faster?" answered from the remembered turn; selecting code and seeing the
+question scoped to it; complexity and optimisation answers; clearing the thread;
+the setup checklist rendering with both model servers made unreachable; **Start Ollama** (the process survives the app closing and the
 port comes up); and the model-download stream, by re-pulling a model that was
 already present, which returns the same NDJSON frames as a first download.
 
@@ -223,3 +254,5 @@ not been run.
 - **One file.** No open, no save-as, no tabs.
 - **One test case.** *Expected output* holds a single expected string, not a
   table of cases.
+- **The thread is not saved.** Questions and answers are lost when the window
+  closes; only the code and the expected output survive a restart.

@@ -12,7 +12,8 @@
 import { parseTraceback, describe, hintFor } from './errors.js';
 import {
 	PROVIDERS, listModels, pickDefaultModel, buildPrompt, chat, stripReasoning,
-	SYSTEM_PROMPT, SYSTEM_PROMPT_REVEAL,
+	SYSTEM_PROMPT, SYSTEM_PROMPT_REVEAL, SYSTEM_PROMPT_ASK,
+	SYSTEM_PROMPT_COMPLEXITY, SYSTEM_PROMPT_OPTIMISE, buildAskPrompt,
 } from './ai.js';
 import { Voice } from './voice.js';
 import { render, escapeHtml } from './markdown.js';
@@ -36,6 +37,10 @@ const els = {
 	diffExplain: $('diff-explain'), diffAsk: $('diff-ask'), diffMeta: $('diff-meta'),
 	expect: $('expect'), expectToggle: $('expect-toggle'),
 	reveal: $('reveal'), diffReveal: $('diff-reveal'),
+	thread: $('thread'), askInput: $('ask-input'), askSend: $('ask-send'),
+	askComplexity: $('ask-complexity'), askOptimise: $('ask-optimise'),
+	threadClear: $('thread-clear'), selChip: $('sel-chip'), selText: $('sel-text'),
+	selClear: $('sel-clear'),
 };
 
 let editor;
@@ -111,6 +116,7 @@ window.monacoLoaded.then(async () => {
 
 	editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, run);
 
+	watchSelections();
 	restoreExpected();
 	await refreshSetup();
 });
@@ -612,6 +618,7 @@ async function refreshSetup() {
 		els.diffAsk.disabled = false;
 		els.reveal.disabled = false;
 		els.diffReveal.disabled = false;
+		setAskEnabled(true);
 	} else {
 		ai.provider = undefined;
 		els.model.textContent = 'no model yet';
@@ -619,6 +626,7 @@ async function refreshSetup() {
 		els.diffAsk.disabled = true;
 		els.reveal.disabled = true;
 		els.diffReveal.disabled = true;
+		setAskEnabled(false);
 	}
 
 	renderSetup(setupState);
@@ -824,3 +832,184 @@ function showDiff(expected, got) {
 }
 
 els.diffAsk.addEventListener('click', () => explain(undefined, 'diff'));
+
+// --- follow-up questions -------------------------------------------------------
+// The first answer arrives on its own; everything after it is asked. This is not
+// a chat transcript - it is a stack of question-and-answer notes, and each one
+// knows which part of the code it was about.
+
+/**
+ * The last few exchanges, so "why?" and "what about the second loop?" work.
+ * Kept short on purpose: a 1.5B model has little context to spare, and old
+ * turns crowd out the code.
+ */
+const history = [];
+const HISTORY_TURNS = 3;
+
+/** What is selected right now, in the editor or in an answer. */
+let selection = '';
+
+function setSelection(text) {
+	selection = (text ?? '').trim();
+	els.selChip.hidden = !selection;
+	// One line in the chip; the model still gets the whole thing.
+	els.selText.textContent = selection.replace(/\s+/g, ' ').slice(0, 120);
+}
+
+els.selClear.addEventListener('click', () => setSelection(''));
+
+/**
+ * Selecting code is the natural way to say "this bit". Watched on the editor,
+ * and on the panel so an answer can be quoted back into a follow-up.
+ */
+function watchSelections() {
+	editor.onDidChangeCursorSelection(e => {
+		const picked = editor.getModel().getValueInRange(e.selection);
+		if (picked.trim()) {
+			setSelection(picked);
+		}
+	});
+
+	document.addEventListener('selectionchange', () => {
+		const sel = document.getSelection();
+		if (!sel || sel.isCollapsed) {
+			return;
+		}
+		// Only text inside the answer panel; ignore the editor's own DOM, which
+		// the Monaco listener above already handles.
+		const node = sel.anchorNode;
+		const host = node?.nodeType === 1 ? node : node?.parentElement;
+		if (host?.closest('.side-top') && !host.closest('#editor')) {
+			setSelection(sel.toString());
+		}
+	});
+}
+
+/** One question and its answer, appended to the stack. */
+function addTurn(question, scope) {
+	const qa = document.createElement('div');
+	qa.className = 'qa';
+
+	const q = document.createElement('div');
+	q.className = 'qa-q';
+	q.textContent = question;
+
+	if (scope) {
+		const s = document.createElement('span');
+		s.className = 'qa-scope';
+		s.textContent = `about: ${scope.replace(/\s+/g, ' ').slice(0, 90)}`;
+		q.appendChild(s);
+	}
+
+	const a = document.createElement('div');
+	a.className = 'explain';
+	a.innerHTML = '<span class="caret"></span>';
+
+	const meta = document.createElement('div');
+	meta.className = 'qa-meta';
+
+	qa.append(q, a, meta);
+	els.thread.appendChild(qa);
+	qa.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+	return { answer: a, meta };
+}
+
+function setAskEnabled(on) {
+	for (const b of [els.askSend, els.askComplexity, els.askOptimise]) {
+		b.disabled = !on;
+	}
+}
+
+/**
+ * Answers a follow-up. `mode` picks the system prompt; the question text is
+ * what appears above the answer.
+ */
+async function ask(question, mode = 'ask') {
+	if (!ai.provider || !editor) {
+		return;
+	}
+
+	const scope = selection;
+	const { answer, meta } = addTurn(question, scope);
+	setAskEnabled(false);
+	aiAbort?.abort();
+	aiAbort = new AbortController();
+
+	const system = mode === 'complexity' ? SYSTEM_PROMPT_COMPLEXITY
+		: mode === 'optimise' ? SYSTEM_PROMPT_OPTIMISE
+			: SYSTEM_PROMPT_ASK;
+
+	const started = Date.now();
+	let text = '';
+
+	try {
+		await chat({
+			provider: ai.provider,
+			model: ai.model,
+			signal: aiAbort.signal,
+			messages: [
+				{ role: 'system', content: system },
+				// Earlier turns, so a bare "why?" still has a subject.
+				...history.slice(-HISTORY_TURNS * 2),
+				{
+					role: 'user',
+					content: buildAskPrompt({
+						code: editor.getValue(),
+						selection: scope,
+						question,
+						parsed: lastRun?.parsed,
+						expected: lastRun?.expected,
+						stdout: lastRun?.stdout,
+					}),
+				},
+			],
+		}, token => {
+			text += token;
+			answer.innerHTML = render(stripReasoning(text)) + '<span class="caret"></span>';
+		});
+
+		const clean = stripReasoning(text);
+		answer.innerHTML = render(clean);
+		meta.textContent = `${ai.model} · ${((Date.now() - started) / 1000).toFixed(1)}s`;
+
+		history.push({ role: 'user', content: question }, { role: 'assistant', content: clean });
+	} catch (err) {
+		if (err.name === 'AbortError') {
+			answer.innerHTML = '<p>Cancelled.</p>';
+		} else {
+			answer.innerHTML = `<p style="color:var(--bad)">${escapeHtml(err.message)}</p>`;
+		}
+	} finally {
+		setAskEnabled(true);
+	}
+}
+
+function submitAsk() {
+	const q = els.askInput.value.trim();
+	if (!q) {
+		return;
+	}
+	els.askInput.value = '';
+	ask(q);
+}
+
+els.askSend.addEventListener('click', submitAsk);
+els.askInput.addEventListener('keydown', e => {
+	if (e.key === 'Enter') {
+		e.preventDefault();
+		submitAsk();
+	}
+});
+
+els.askComplexity.addEventListener('click', () => ask(
+	selection ? 'What is the time and space complexity of this part?' : 'What is the time and space complexity?',
+	'complexity'));
+
+els.askOptimise.addEventListener('click', () => ask(
+	selection ? 'Can this part be made faster?' : 'Can this be made faster or use less memory?',
+	'optimise'));
+
+els.threadClear.addEventListener('click', () => {
+	els.thread.textContent = '';
+	history.length = 0;
+});

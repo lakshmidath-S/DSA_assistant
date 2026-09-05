@@ -57,6 +57,11 @@ assert.match(render('`code`'), /<code>code<\/code>/, 'inline code should render'
 assert.match(render('```\nx = 1\n```'), /<pre><code>x = 1<\/code><\/pre>/, 'fence should render');
 assert.strictEqual(escapeHtml(`<>&"'`), '&lt;&gt;&amp;&quot;&#39;');
 assert.strictEqual(render(undefined), '', 'undefined must not throw');
+
+// Complexity answers arrive wrapped in LaTeX delimiters more often than not.
+assert.strictEqual(render(String.raw`It is \(O(n^2)\) here.`), '<p>It is O(n^2) here.</p>', 'inline math delimiters stripped');
+assert.strictEqual(render(String.raw`\[O(n)\]`), '<p>O(n)</p>', 'display math delimiters stripped');
+assert.match(render(String.raw`\(<img src=x onerror=alert(1)>\)`), /&lt;img/, 'stripping math must not unescape markup');
 console.log('ok    intended markup still renders');
 
 console.log(`\n${attacks.length - bad}/${attacks.length} payloads neutralised`);
