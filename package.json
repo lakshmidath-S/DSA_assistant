@@ -6,7 +6,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node test/errors.test.mjs && node test/markdown.test.mjs",
+    "test": "node test/errors.test.mjs && node test/harness.test.mjs && node test/markdown.test.mjs",
     "audit": "npm audit --omit=dev"
   },
   "license": "MIT",

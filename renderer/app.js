@@ -41,6 +41,7 @@ const els = {
 	askComplexity: $('ask-complexity'), askOptimise: $('ask-optimise'),
 	threadClear: $('thread-clear'), selChip: $('sel-chip'), selText: $('sel-text'),
 	selClear: $('sel-clear'),
+	values: $('values'), valuesRows: $('values-rows'),
 };
 
 let editor;
@@ -268,8 +269,14 @@ function showError(parsed, code) {
 	els.errType.textContent = describe(parsed);
 	els.errHint.textContent = hintFor(parsed);
 
+	// A traceback can name a line this buffer does not have - a frame from
+	// another file, or a stale run against code that has since been edited down.
+	// Monaco throws "Illegal value for lineNumber" on those, which kills the rest
+	// of showError and leaves the panel half-drawn, so the error still gets
+	// reported but nothing is marked.
+	const lineCount = editor.getModel().getLineCount();
 	const line = parsed.primary?.line;
-	if (line) {
+	if (line && line >= 1 && line <= lineCount) {
 		const text = code.split('\n')[line - 1] ?? '';
 		els.errLine.textContent = `${line}  ${text.trim()}`;
 		markLine(parsed, text);
@@ -279,6 +286,7 @@ function showError(parsed, code) {
 	}
 
 	lastRun.parsed = parsed;
+	showValues(lastRun.values);
 
 	// Arrives on its own. The old build made you ask, which is what made it feel
 	// like a chat window rather than part of the editor.
@@ -290,6 +298,7 @@ function showError(parsed, code) {
 function showClean(result, matchedExpected) {
 	els.okCard.hidden = false;
 	els.card.hidden = true;
+	els.values.hidden = true;
 	els.diffCard.hidden = true;
 
 	const printed = (result.stdout ?? '').trim();
@@ -824,6 +833,7 @@ els.expect.addEventListener('input', () => {
 function showDiff(expected, got) {
 	els.diffCard.hidden = false;
 	els.card.hidden = true;
+	els.values.hidden = true;
 	els.okCard.hidden = true;
 	els.diffWant.textContent = expected || '(nothing)';
 	els.diffGot.textContent = got || '(nothing)';
@@ -960,6 +970,7 @@ async function ask(question, mode = 'ask') {
 						parsed: lastRun?.parsed,
 						expected: lastRun?.expected,
 						stdout: lastRun?.stdout,
+						values: lastRun?.values,
 					}),
 				},
 			],
@@ -1013,3 +1024,27 @@ els.threadClear.addEventListener('click', () => {
 	els.thread.textContent = '';
 	history.length = 0;
 });
+
+/**
+ * Shows what the variables held when the run failed.
+ *
+ * The reader gets the same facts the model does. Often that is the whole
+ * explanation: `u = 9` beside a list of length 3 needs no prose.
+ */
+function showValues(values) {
+	els.valuesRows.textContent = '';
+	const entries = values?.locals ? Object.entries(values.locals) : [];
+	els.values.hidden = entries.length === 0;
+
+	for (const [name, repr] of entries) {
+		const tr = document.createElement('tr');
+		const n = document.createElement('td');
+		n.className = 'vname';
+		n.textContent = name;
+		const v = document.createElement('td');
+		v.className = 'vval';
+		v.textContent = repr;
+		tr.append(n, v);
+		els.valuesRows.appendChild(tr);
+	}
+}

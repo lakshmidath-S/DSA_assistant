@@ -26,6 +26,15 @@ const STATE_FILE = path.join(STATE_DIR, 'last.json');
 /** The file Python actually runs. Kept on disk so tracebacks have a real path. */
 const SCRATCH_FILE = path.join(STATE_DIR, 'main.py');
 
+/** Runs the file and records the variables at a failure. See python/harness.py. */
+const HARNESS = path.join(__dirname, 'python', 'harness.py');
+
+/** Prefix of the stderr line the harness uses to report captured values. */
+const VALUES_MARKER = '__MYIDE_VALUES__';
+
+/** Named so no template in this file has to carry an escape inline. */
+const NEWLINE = String.fromCharCode(10);
+
 /** A blank file is the starting point every time, unless a session is restored. */
 const BLANK = '';
 
@@ -247,6 +256,36 @@ async function resolvePython() {
 	return undefined;
 }
 
+
+/**
+ * Pulls the harness's values line out of stderr, and returns what should
+ * actually be shown.
+ *
+ * The line has to be removed rather than left in place: the editor parses this
+ * text as a traceback, and the output panel shows it verbatim.
+ */
+function extractValues(stderr) {
+	if (!stderr.includes(VALUES_MARKER)) {
+		return { values: undefined, text: stderr };
+	}
+
+	let values;
+	const kept = [];
+	for (const line of stderr.split(NEWLINE)) {
+		if (!line.startsWith(VALUES_MARKER)) {
+			kept.push(line);
+			continue;
+		}
+		try {
+			values = JSON.parse(line.slice(VALUES_MARKER.length));
+		} catch {
+			// A truncated line is not worth failing the run over.
+		}
+	}
+
+	return { values, text: kept.join(NEWLINE) };
+}
+
 ipcMain.handle('run:start', async (_event, code) => {
 	killCurrent();
 
@@ -275,7 +314,7 @@ ipcMain.handle('run:start', async (_event, code) => {
 
 		let child;
 		try {
-			child = spawn(cmd, [...args, '-X', 'utf8', '-u', SCRATCH_FILE], {
+			child = spawn(cmd, [...args, '-X', 'utf8', '-u', HARNESS, SCRATCH_FILE], {
 				cwd: STATE_DIR,
 				windowsHide: true,
 				env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
@@ -292,6 +331,10 @@ ipcMain.handle('run:start', async (_event, code) => {
 			killCurrent();
 		}, RUN_TIMEOUT_MS);
 
+		// stderr is streamed a line at a time so the harness's values marker can
+		// be held back: it is for the model, not the reader, and a partial chunk
+		// must not leak half of it into the panel.
+		let errTail = '';
 		const push = (bucket, chunk) => {
 			const text = chunk.toString('utf8');
 			if (bucket === 'out') {
@@ -301,7 +344,17 @@ ipcMain.handle('run:start', async (_event, code) => {
 			}
 			// Stream it so long-running programs show progress rather than
 			// appearing frozen until they exit.
-			win?.webContents.send('run:data', { bucket, text });
+			if (bucket !== 'err') {
+				win?.webContents.send('run:data', { bucket, text });
+				return;
+			}
+			errTail += text;
+			const parts = errTail.split(NEWLINE);
+			errTail = parts.pop() ?? '';
+			const shown = parts.filter(l => !l.startsWith(VALUES_MARKER));
+			if (shown.length) {
+				win?.webContents.send('run:data', { bucket, text: shown.join(NEWLINE) + NEWLINE });
+			}
 		};
 
 		child.stdout.on('data', c => push('out', c));
@@ -323,12 +376,18 @@ ipcMain.handle('run:start', async (_event, code) => {
 		child.on('close', exitCode => {
 			clearTimeout(timer);
 			current = null;
+
+			// What the variables actually held when it failed. Absent for a clean
+			// run, and for a SyntaxError, where nothing ever executed.
+			const { values, text: cleanStderr } = extractValues(stderr);
+
 			resolve({
+				values,
 				ok: exitCode === 0 && !timedOut,
 				stdout,
 				stderr: timedOut
-					? `${stderr}\n[stopped after ${RUN_TIMEOUT_MS / 1000}s - is there an infinite loop?]`
-					: stderr,
+					? `${cleanStderr}\n[stopped after ${RUN_TIMEOUT_MS / 1000}s - is there an infinite loop?]`
+					: cleanStderr,
 				code: timedOut ? -2 : exitCode,
 				ms: Date.now() - started,
 				file: SCRATCH_FILE,

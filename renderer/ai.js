@@ -23,6 +23,9 @@
 
 'use strict';
 
+/** Newline, named so the templates above do not need an escape inline. */
+const NL = String.fromCharCode(10);
+
 export const PROVIDERS = {
 	lmstudio: { label: 'LM Studio', endpoint: 'http://127.0.0.1:1234' },
 	ollama: { label: 'Ollama', endpoint: 'http://127.0.0.1:11434' },
@@ -120,11 +123,26 @@ export const SYSTEM_PROMPT_REVEAL = [
  * Builds the user message. Everything here is fact: the traceback came from
  * Python, the source is what ran, the output is what it printed.
  */
-export function buildPrompt({ code, parsed, stdout, expected, question }) {
+export function buildPrompt({ code, parsed, stdout, expected, values, question }) {
 	const parts = [];
 
 	if (parsed) {
 		parts.push('PYTHON REPORTED THIS ERROR:', '```', parsed.raw, '```', '');
+
+		// The real variables at the moment it failed. This is the difference
+		// between explaining and guessing: without them the model has to
+		// simulate the program, and it makes arithmetic slips doing so.
+		if (values?.locals && Object.keys(values.locals).length) {
+			const rows = Object.entries(values.locals).map(([k, v]) => `  ${k} = ${v}`);
+			parts.push(
+				`THESE WERE THE ACTUAL VALUES AT THAT MOMENT, inside ${values.function}():`,
+				'```', rows.join(NL), '```',
+				'These were recorded from the run itself. They are not guesses and they',
+				'are not examples. Quote these exact values in your explanation. Do NOT',
+				'state a different value for any of these names, and do NOT say a',
+				'variable "could be" something - you have been told what it was.', '',
+			);
+		}
 		if (parsed.primary) {
 			const lines = code.split('\n');
 			const n = parsed.primary.line;
@@ -177,8 +195,18 @@ export function buildPrompt({ code, parsed, stdout, expected, question }) {
 		parts.push('WHAT IT PRINTED:', '```', stdout.trim().slice(0, 2000), '```', '');
 	}
 
+	// Naming the values in the question itself, not just in the context above.
+	// A 7B model reads the closing instruction hardest: given the values only
+	// as context it still answered "u could be greater than or equal to n"
+	// while holding u = 9, because a generic IndexError explanation is the
+	// likelier continuation. Quoting them here makes hedging the harder path.
+	const recorded = values?.locals
+		? Object.entries(values.locals).slice(0, 6).map(([k, v]) => `${k} = ${v}`).join(', ')
+		: '';
 	const fallback = parsed
-		? 'What is going wrong here, and why?'
+		? (recorded
+			? `The recorded values were: ${recorded}. Using those exact numbers, what went wrong and why?`
+			: 'What is going wrong here, and why?')
 		: expected !== undefined
 			? 'Why is the output different from what I expected?'
 			: 'Is this output correct?';
@@ -331,7 +359,7 @@ export const SYSTEM_PROMPT_OPTIMISE = [
  * The selection is what makes this useful: "why is this O(n^2)" means nothing
  * without knowing which part "this" is.
  */
-export function buildAskPrompt({ code, selection, question, parsed, expected, stdout }) {
+export function buildAskPrompt({ code, selection, question, parsed, expected, stdout, values }) {
 	const parts = [];
 
 	const numbered = code.split('\n')
@@ -349,6 +377,10 @@ export function buildAskPrompt({ code, selection, question, parsed, expected, st
 	// Whatever the last run showed is still the context they are sitting in.
 	if (parsed) {
 		parts.push('THE LAST RUN FAILED WITH:', '```', parsed.raw, '```', '');
+		if (values?.locals && Object.keys(values.locals).length) {
+			const rows = Object.entries(values.locals).map(([k, v]) => `  ${k} = ${v}`);
+			parts.push(`ACTUAL VALUES AT THE FAILURE, inside ${values.function}():`, '```', rows.join(NL), '```', '');
+		}
 	} else if (expected !== undefined) {
 		parts.push(
 			`THE LAST RUN PRINTED ${JSON.stringify((stdout ?? '').trim())}`,

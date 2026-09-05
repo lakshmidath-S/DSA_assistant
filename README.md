@@ -25,6 +25,10 @@ quieter button rather than the default.
 - When it **crashes**, the failing line is marked in the editor: gutter dot,
   tinted row, and a squiggle under the exact span Python blamed. Editing clears
   the mark.
+- It also shows **what the variables actually held** at that moment - `u = 9`
+  beside `graph = [[1], [], []]` is often the whole explanation on its own. The
+  model is given the same values, so it reads facts rather than simulating the
+  program.
 - When it **runs but prints the wrong thing**, you get an expected-vs-got card
   instead. Fill in *Expected output* and every run is checked against it.
 - Either way a local model explains it, unprompted — what went wrong and why,
@@ -132,6 +136,30 @@ idea applies is the insight; typing it is the exercise. Asked about an O(n²)
 `two_sum`, `qwen2.5-coder:7b` named the hash map and explained that it removes
 the repeated pair checking, without producing the rewritten function.
 
+### Values beat reasoning
+
+`python/harness.py` runs the file and, if it raises, reports the locals of the
+deepest frame that is the user's own code. Without that the model has to
+simulate the program, and a 7B model is not reliable at it: asked about a wrong
+`two_sum` it traced the loop correctly and then wrote that the result
+"translates to `[3, 0]`" having just derived `[1, 0]`.
+
+Handing over the values was necessary but not sufficient. Given them only as
+context, `qwen2.5-coder:7b` still answered that "u could be greater than or
+equal to n" while holding `u = 9` - a generic IndexError explanation is simply
+the likelier continuation. Naming the values in the closing question as well
+fixed it: it then said the code was accessing `graph[9]`, which does not exist
+because the graph has indices 0 to 2.
+
+The harness prints those values as one marker line on stderr rather than to a
+file, because there is no directory it can rely on being writable: writes into
+the app's own data directory were silently discarded on one machine while the
+same code worked from the project folder. The editor strips the line before
+anything sees it, and `test/harness.test.mjs` asserts that what remains is byte
+for byte what Python would have printed - running the file through `exec()` adds
+a frame of our own, and an unnormalised path prints forward slashes where Python
+prints backslashes.
+
 Two details of real tracebacks are easy to get wrong, and both are covered:
 
 - Since 3.11 the marker line mixes `~` and `^` (`return 1 / 0` → `~~^~~`), so
@@ -178,6 +206,7 @@ timeout and process-tree kill are there for runaway loops, not hostile code.
 
 ```
 main.js              Electron shell: finds Python, runs it, owns the scratch file
+python/harness.py    runs the file; reports the variables at a failure
 preload.js           the renderer's entire privileged surface
 renderer/
   boot.js            Monaco's AMD bootstrap (separate file - CSP forbids inline)
@@ -189,7 +218,8 @@ renderer/
   setup.js           what this machine has; starting Ollama; downloading a model
   voice.js           push to talk, waveform, explicit states
 servers/             voice_server.py (optional speech)
-test/                traceback cases run through real Python; XSS payloads
+test/                traceback cases and harness runs against real Python;
+                     XSS payloads against the answer renderer
 install.ps1          Windows shortcuts
 install.sh           macOS bundle / Linux .desktop entry
 ```
@@ -234,6 +264,7 @@ and nothing in the console. A promise cannot be missed.
 Verified by running it, on Windows: traceback marking and explanation; the
 wrong-answer card and its explanation; that the default answer explains without
 writing the fix, and that *Show the fix* then returns the corrected line;
+the variables panel and the model quoting `graph[9]` from the recorded values;
 session save and restore; asking a follow-up and having a bare "why does that
 make it faster?" answered from the remembered turn; selecting code and seeing the
 question scoped to it; complexity and optimisation answers; clearing the thread;
@@ -248,9 +279,12 @@ not been run.
 
 ## Not done yet
 
-- **No stepping.** No breakpoints, no variable inspection. Feeding real values
-  rather than just the traceback is the biggest remaining lever on answer
-  quality, and it means wiring up debugpy properly.
+- **Values only at a crash.** A run that finishes but prints the wrong answer
+  gets no recorded variables, because nothing raised. Capturing those needs
+  tracing rather than an exception handler, which is the same machinery a
+  step-through visualiser would want.
+- **No stepping.** No breakpoints, and no way to inspect state at a line that
+  did not fail.
 - **One file.** No open, no save-as, no tabs.
 - **One test case.** *Expected output* holds a single expected string, not a
   table of cases.

@@ -1,2 +1,4 @@
 node_modules/
 myide.vbs
+__pycache__/
+*.pyc
