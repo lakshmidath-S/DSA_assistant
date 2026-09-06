@@ -83,9 +83,18 @@ export class Voice {
 		return Boolean(await this.health());
 	}
 
-	/** Opens the microphone and starts drawing. Held open until stop(). */
+	/**
+	 * Opens the microphone and starts drawing. Held open until stop().
+	 *
+	 * The guard is on the recorder, not on the state. It used to refuse unless
+	 * the state was exactly 'idle', which the caller had just moved off by
+	 * reporting that it was checking on - or starting - the speech server. So
+	 * start() returned without creating a recorder, the caller's own timer went
+	 * on saying "Listening", and stopping threw on a recorder that was never
+	 * made. An open microphone is the only thing a second start must refuse.
+	 */
 	async start() {
-		if (this.state !== 'idle') {
+		if (this.recorder) {
 			return;
 		}
 		this.setState('listening');
@@ -106,6 +115,11 @@ export class Voice {
 		source.connect(this.analyser);
 
 		this.recorder = new MediaRecorder(this.stream, { mimeType: 'audio/webm' });
+		if (!this.recorder) {
+			this.teardown();
+			this.setState('idle');
+			throw new Error('The browser would not open a recorder for this microphone.');
+		}
 		this.recorder.ondataavailable = e => {
 			if (e.data.size > 0) {
 				this.chunks.push(e.data);
@@ -128,7 +142,9 @@ export class Voice {
 	 * @returns {Promise<string>} the recognised text, or '' if nothing was said.
 	 */
 	async stop() {
-		if (this.state !== 'listening') {
+		if (!this.recorder) {
+			this.teardown();
+			this.setState('idle');
 			return '';
 		}
 
@@ -229,6 +245,9 @@ export class Voice {
 	teardown() {
 		cancelAnimationFrame(this.raf);
 		this.raf = 0;
+		// Cleared here and nowhere else: start() reads it to decide whether a
+		// microphone is already open.
+		this.recorder = undefined;
 		this.stream?.getTracks().forEach(t => t.stop());
 		this.audioContext?.close();
 		this.stream = undefined;

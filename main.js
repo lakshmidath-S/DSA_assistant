@@ -677,7 +677,7 @@ const START_GRACE_MS = 12_000;
 const lastStart = { ollama: 0, lmstudio: 0 };
 
 /** PowerShell's literal string: single quotes, and a quote inside one doubled. */
-const psQuote = text => Q + String(text).split(Q).join(Q + Q) + Q;
+const psQuote = text => "'" + String(text).split("'").join("''") + "'";
 
 /**
  * Launches a server so that it outlives us, shows nothing, and can be found
@@ -817,6 +817,7 @@ async function startServer(name) {
 			// `ollama serve` IS the server, so its pid is the thing to remember.
 			const pid = await launchDetached(name, bin, spec.args);
 			if (!pid) {
+				lastStart[name] = 0;
 				return { name, ok: false, error: `${spec.label} did not start.` };
 			}
 			ourServers[name] = { pid, bin };
@@ -841,6 +842,9 @@ async function startServer(name) {
 		ourServers[name] = { bin };
 		return { name, ok: true };
 	} catch (err) {
+		// Let the next press try again immediately: the grace period is there
+		// to protect a start that is working, not to sit out one that failed.
+		lastStart[name] = 0;
 		return { name, ok: false, error: err.message };
 	}
 }
@@ -869,13 +873,21 @@ ipcMain.handle('setup:startServers', async (_event, only) => {
 		}
 
 		// Installed-but-absent is not a failure worth reporting as one: having
-		// only Ollama, or only LM Studio, is the normal case.
+		// only Ollama, or only LM Studio, is the normal case. A server that IS
+		// installed and still would not start is a real failure, and reporting
+		// it as success because the other one came up hid a broken launch
+		// completely - the button looked like it had worked.
 		const usable = results.filter(r => r.ok);
+		const broken = results.filter(r => !r.ok && !/is not installed/.test(r.error ?? ''));
+
 		return {
 			ok: usable.length > 0,
 			results,
 			starting: usable.map(r => r.name),
-			error: usable.length ? undefined : results.map(r => r.error).filter(Boolean).join(' '),
+			failed: broken.map(r => r.name),
+			error: broken.length
+				? broken.map(r => `${SERVERS[r.name].label}: ${r.error}`).join('; ')
+				: (usable.length ? undefined : results.map(r => r.error).filter(Boolean).join(' ')),
 		};
 	} finally {
 		startingServers = false;

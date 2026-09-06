@@ -248,14 +248,14 @@ async function run() {
 
 	lastRun = { ...result, code };
 
-	// A missing interpreter is a setup problem, not a bug in the program. Show
-	// the checklist rather than an error that cannot be acted on.
+	// A missing interpreter is a setup problem, not a bug in the program. Open
+	// the checklist rather than report an error that cannot be acted on.
 	if (result.stderr === 'no-python') {
 		els.status.textContent = '';
 		els.out.textContent = '';
 		els.outEmpty.hidden = false;
 		await refreshSetup();
-		els.setup.hidden = false;
+		openSettings();
 		return;
 	}
 
@@ -620,7 +620,7 @@ async function stopRecordingAndAsk() {
 
 	// Show what it heard before acting on it: a wrong transcription otherwise
 	// produces a confusing answer with no visible cause.
-	voice.setState('thinking', `${LQ}${said}${RQ}`);
+	voice.setState('thinking', `“${said}”`);
 	await new Promise(r => setTimeout(r, 900));
 	els.overlay.hidden = true;
 	els.mic.classList.remove('live');
@@ -795,11 +795,16 @@ async function doRefreshSetup() {
 	const ready = isReady(setupState);
 	els.setupBanner.hidden = ready;
 	if (!ready) {
+		const stocked = (setupState.servers ?? []).some(s => s.models.length);
+		const idle = [setupState.ollamaPath, setupState.lmsPath].filter(Boolean).length
+			> (setupState.servers ?? []).length;
 		els.setupBannerNote.textContent = !setupState.python?.ok
 			? 'Python 3 was not found'
-			: (setupState.servers ?? []).some(s => s.models.length)
-				? 'A model server is installed but not started'
-				: 'No model is available yet';
+			: !stocked
+				? 'No model is available yet'
+				: idle
+					? 'A model server is installed but not started'
+					: 'Something still needs attention';
 	}
 
 	if (!els.settings.hidden) {

@@ -117,15 +117,14 @@ export async function probe() {
 /**
  * True when the machine is ready to explain an error.
  *
- * Any one server with any one model is enough. The checklist stays up while
- * another is installed but not started, so the "Start models" button remains
- * reachable rather than vanishing the moment the first server answers.
+ * One server with one model is enough, because that is genuinely enough to
+ * answer. Requiring every installed server to be running left the banner
+ * nagging for ever at anyone who deliberately uses only one of them - and the
+ * app now starts only the server your model needs, so that would be everyone.
+ * The other server stays one click away in Settings.
  */
 export function isReady(state) {
-	const stocked = (state.servers ?? []).some(s => s.models.length);
-	const installed = [state.ollamaPath, state.lmsPath].filter(Boolean).length;
-	const running = (state.servers ?? []).length;
-	return Boolean(state.python?.ok && stocked && running >= installed);
+	return Boolean(state.python?.ok && (state.servers ?? []).some(s => s.models.length));
 }
 
 /**

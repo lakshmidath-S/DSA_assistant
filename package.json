@@ -6,15 +6,17 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node test/errors.test.mjs && node test/harness.test.mjs && node test/markdown.test.mjs && node test/ai.test.mjs",
+    "test": "eslint . && node test/errors.test.mjs && node test/harness.test.mjs && node test/markdown.test.mjs && node test/ai.test.mjs",
     "audit": "npm audit --omit=dev",
     "dist": "electron-builder",
-    "pack": "electron-builder --dir"
+    "pack": "electron-builder --dir",
+    "lint": "eslint ."
   },
   "license": "MIT",
   "devDependencies": {
     "electron": "^44.2.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "eslint": "^10.10.0"
   },
   "dependencies": {
     "monaco-editor": "^0.52.2"
