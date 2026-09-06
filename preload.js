@@ -31,9 +31,15 @@ contextBridge.exposeInMainWorld('studio', {
 
 	info: () => ipcRenderer.invoke('app:info'),
 
-	/** What this machine has: Python, and whether a model server is installed. */
+	/** What this machine has: Python, and which model servers are installed. */
 	probe: () => ipcRenderer.invoke('setup:probe'),
-	startOllama: () => ipcRenderer.invoke('setup:startOllama'),
+
+	/** Brings up every installed model server that is not already running. */
+	startServers: only => ipcRenderer.invoke('setup:startServers', only),
+
+	/** Brings up the optional speech server, and what it has said if it failed. */
+	startSpeech: () => ipcRenderer.invoke('setup:startSpeech'),
+	speechLog: () => ipcRenderer.invoke('setup:speechLog'),
 	openUrl: url => ipcRenderer.invoke('setup:openUrl', url),
 	reportError: message => ipcRenderer.invoke('app:error', message),
 });

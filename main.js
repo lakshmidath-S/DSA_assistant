@@ -16,6 +16,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs/promises');
+const net = require('node:net');
 const path = require('node:path');
 const os = require('node:os');
 
@@ -39,6 +40,14 @@ const HARNESS = app.isPackaged
 	? path.join(process.resourcesPath, 'python', 'harness.py')
 	: path.join(__dirname, 'python', 'harness.py');
 
+/** The optional speech server. Spawned by Python, so it cannot live in the asar either. */
+const SPEECH_SCRIPT = app.isPackaged
+	? path.join(process.resourcesPath, 'servers', 'voice_server.py')
+	: path.join(__dirname, 'servers', 'voice_server.py');
+
+/** Where the speech server listens. Mirrors VOICE_ENDPOINT in renderer/voice.js. */
+const SPEECH_PORT = 8756;
+
 /**
  * Prefixes of the stderr lines the harness reports through. These are for the
  * editor, not the reader: every one of them is stripped before the output panel
@@ -58,6 +67,9 @@ const BLANK = '';
 
 /** Kill a run that will clearly never finish on its own. */
 const RUN_TIMEOUT_MS = 15_000;
+
+/** How long to spend stopping model servers before quitting regardless. */
+const SHUTDOWN_TIMEOUT_MS = 5_000;
 
 /** Cap captured output so a runaway loop cannot exhaust memory. */
 const MAX_OUTPUT_CHARS = 200_000;
@@ -112,9 +124,17 @@ function createWindow() {
 	if (process.env.STUDIO_SHOT && !app.isPackaged) {
 		win.webContents.once('did-finish-load', () => {
 			setTimeout(async () => {
+				// Every step here is guarded. An expression that throws in the
+				// page used to reject into nothing, which skipped the capture
+				// AND the quit - so the window sat there forever and the only
+				// symptom was a run that never ended.
 				if (process.env.STUDIO_EVAL) {
-					const out = await win.webContents.executeJavaScript(process.env.STUDIO_EVAL);
-					console.log(`[eval] ${JSON.stringify(out)}`);
+					try {
+						const out = await win.webContents.executeJavaScript(process.env.STUDIO_EVAL);
+						console.log(`[eval] ${JSON.stringify(out)}`);
+					} catch (err) {
+						console.log(`[eval-error] ${err.message}`);
+					}
 				}
 				if (process.env.STUDIO_SHOT_RUN) {
 					await win.webContents.executeJavaScript("document.getElementById('run').click()");
@@ -124,14 +144,20 @@ function createWindow() {
 					await win.webContents.executeJavaScript("document.getElementById('ask').click()");
 					await new Promise(r => setTimeout(r, Number(process.env.STUDIO_SHOT_ASK)));
 				}
-				// An occluded window stops producing compositor frames, and
-				// capturePage then comes back empty - so raise it first.
-				win.show();
-				win.moveTop();
-				await new Promise(r => setTimeout(r, 700));
-				const image = await win.webContents.capturePage();
-				await fs.writeFile(process.env.STUDIO_SHOT, image.toPNG());
-				console.log(`[shot] ${process.env.STUDIO_SHOT}`);
+				try {
+					// An occluded window stops producing compositor frames, and
+					// capturePage then comes back empty - so raise it first.
+					win.show();
+					win.moveTop();
+					await new Promise(r => setTimeout(r, 700));
+					const image = await win.webContents.capturePage();
+					await fs.writeFile(process.env.STUDIO_SHOT, image.toPNG());
+					console.log(`[shot] ${process.env.STUDIO_SHOT}`);
+				} catch (err) {
+					console.log(`[shot-error] ${err.message}`);
+				}
+				// Outside the try: quitting is the one step that must happen
+				// however the rest went, or the run never ends.
 				if (process.env.STUDIO_SHOT_EXIT) { app.quit(); }
 			}, Number(process.env.STUDIO_SHOT_DELAY ?? 2500));
 		});
@@ -153,16 +179,44 @@ function createWindow() {
 	win.on('closed', () => { win = null; });
 }
 
-app.whenReady().then(async () => {
-	await fs.mkdir(STATE_DIR, { recursive: true });
-	createWindow();
-
-	app.on('activate', () => {
-		if (BrowserWindow.getAllWindows().length === 0) {
-			createWindow();
+/*
+ * One copy at a time.
+ *
+ * There is one scratch file, one session and one idea of whether a model
+ * server is already being started, and all three are per process - so a second
+ * copy is not a second window, it is a second set of state fighting the first
+ * over the same files and the same port. Starting one is easy to do by
+ * accident: the shortcut is still there while the first copy is busy, and a
+ * busy copy is exactly when someone launches it again.
+ *
+ * The lock has to be taken before anything else. A copy that does not get it
+ * quits without creating a window, and hands its launch to the copy that did.
+ */
+if (!app.requestSingleInstanceLock()) {
+	app.quit();
+} else {
+	app.on('second-instance', () => {
+		// Raising the existing window is the useful answer to "open it again".
+		if (win) {
+			if (win.isMinimized()) {
+				win.restore();
+			}
+			win.show();
+			win.focus();
 		}
 	});
-});
+
+	app.whenReady().then(async () => {
+		await fs.mkdir(STATE_DIR, { recursive: true });
+		createWindow();
+
+		app.on('activate', () => {
+			if (BrowserWindow.getAllWindows().length === 0) {
+				createWindow();
+			}
+		});
+	});
+}
 
 app.on('window-all-closed', () => {
 	killCurrent();
@@ -171,7 +225,33 @@ app.on('window-all-closed', () => {
 	}
 });
 
-app.on('before-quit', killCurrent);
+/*
+ * Take the model servers down with us - the ones we brought up.
+ *
+ * A server left running holds several gigabytes of weights and, on a laptop,
+ * the GPU with them, which is not a reasonable thing for a closed editor to be
+ * doing. Anything that was already running when myIDE opened is left alone:
+ * see ourServers.
+ *
+ * Quitting has to be held open for it. `before-quit` fires and the process
+ * leaves immediately unless the default is prevented, which would leave the
+ * taskkill half issued - so the first pass stops the servers and quits again
+ * once they are gone, with a timeout so a stuck server cannot trap the app.
+ */
+let shuttingDown = false;
+
+app.on('before-quit', event => {
+	killCurrent();
+
+	const ours = Object.values(ourServers).some(Boolean) || Boolean(speechChild);
+	if (shuttingDown || !ours) {
+		return;
+	}
+
+	shuttingDown = true;
+	event.preventDefault();
+	stopOurServers().finally(() => app.quit());
+});
 
 function killCurrent() {
 	if (current && !current.killed) {
@@ -436,6 +516,24 @@ ipcMain.handle('run:stop', () => {
 // explain itself rather than just failing. Everything here is detection plus one
 // action: starting a server that is installed but not running.
 
+/**
+ * Where LM Studio puts its command line tool, per platform.
+ *
+ * `lms` is what can start the server without opening the desktop app, and it
+ * lives beside the models rather than with the application: `lms bootstrap`
+ * creates ~/.lmstudio/bin and puts it on PATH. The app's own executable is not
+ * useful here - launching it shows a window and does not necessarily start the
+ * server.
+ */
+function lmStudioCandidates() {
+	const home = os.homedir();
+	const bin = process.platform === 'win32' ? 'lms.exe' : 'lms';
+	return [
+		path.join(home, '.lmstudio', 'bin', bin),
+		path.join(home, '.cache', 'lm-studio', 'bin', bin),
+	];
+}
+
 /** Where Ollama installs itself, per platform. */
 function ollamaCandidates() {
 	const home = os.homedir();
@@ -451,8 +549,15 @@ function ollamaCandidates() {
 	return ['/usr/local/bin/ollama', '/usr/bin/ollama', path.join(home, '.local', 'bin', 'ollama')];
 }
 
-async function findOllama() {
-	for (const p of ollamaCandidates()) {
+/**
+ * The first of `candidates` that exists, else whatever is on PATH under `name`.
+ *
+ * Both halves are needed. The install locations cover the normal case without
+ * spawning anything; PATH covers a package manager, or an install moved
+ * somewhere of its own, which happens with both of these tools.
+ */
+async function findBinary(candidates, name) {
+	for (const p of candidates) {
 		if (!p) {
 			continue;
 		}
@@ -463,13 +568,13 @@ async function findOllama() {
 			/* try the next location */
 		}
 	}
-	// Fall back to PATH: a package manager may have put it somewhere else.
+
 	return new Promise(resolve => {
 		const which = process.platform === 'win32' ? 'where' : 'which';
 		let out = '';
 		let child;
 		try {
-			child = spawn(which, ['ollama'], { windowsHide: true });
+			child = spawn(which, [name], { windowsHide: true });
 		} catch {
 			resolve(undefined);
 			return;
@@ -480,33 +585,360 @@ async function findOllama() {
 	});
 }
 
+const findOllama = () => findBinary(ollamaCandidates(), 'ollama');
+const findLmStudio = () => findBinary(lmStudioCandidates(), 'lms');
+
 ipcMain.handle('setup:probe', async () => {
 	const python = await resolvePython();
+	const [ollamaPath, lmsPath, speechRunning] = await Promise.all([
+		findOllama(),
+		findLmStudio(),
+		portAnswers(SPEECH_PORT),
+	]);
+
+	// Voice needs Python and the server script; whether its Python packages are
+	// installed is not worth spawning an interpreter to find out on every
+	// probe, so that failure surfaces when the server is actually started.
+	let speechScript = false;
+	try {
+		await fs.access(SPEECH_SCRIPT);
+		speechScript = true;
+	} catch {
+		/* not shipped, or moved */
+	}
+
 	return {
 		platform: process.platform,
 		python: python ? { ok: true, ...python } : { ok: false },
-		ollamaPath: await findOllama(),
+		ollamaPath,
+		lmsPath,
+		speech: {
+			possible: Boolean(python) && speechScript,
+			running: speechRunning,
+		},
 	};
 });
 
+/** Where Ollama listens. Mirrors PROVIDERS.ollama in renderer/ai.js. */
+/** Where each provider listens. Mirrors PROVIDERS in renderer/ai.js. */
+const SERVER_PORTS = { ollama: 11434, lmstudio: 1234 };
+
 /**
- * Starts a model server that is installed but not running - the single most
- * common reason the AI panel is dead on a fresh machine. Detached, so closing
- * myIDE does not take the server with it.
+ * How to start each provider without opening its desktop window.
+ *
+ * Ollama's CLI *is* the server: `serve` runs until killed. LM Studio's `lms`
+ * is a control program - `server start` brings the server up and returns
+ * immediately, so the process this spawns is expected to exit at once and its
+ * exit code is the thing worth reporting.
  */
-ipcMain.handle('setup:startOllama', async () => {
-	const bin = await findOllama();
-	if (!bin) {
-		return { ok: false, error: 'Ollama is not installed.' };
-	}
-	try {
-		const child = spawn(bin, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true });
+const SERVERS = {
+	ollama: { label: 'Ollama', find: () => findOllama(), args: ['serve'], stays: true },
+	lmstudio: { label: 'LM Studio', find: () => findLmStudio(), args: ['server', 'start'], stays: false },
+};
+
+/**
+ * What this copy of myIDE started, so it can stop exactly that on the way out.
+ *
+ * Only what we started. A server that was already running when myIDE opened
+ * belongs to whoever started it - someone may be part way through a chat in
+ * LM Studio's own window - and closing an editor is not a reason to take it
+ * from them. Absent means we did not start it.
+ */
+const ourServers = { ollama: undefined, lmstudio: undefined };
+
+/** The speech server, if we started it, and what it has told us on stderr. */
+let speechChild = null;
+let speechLog = '';
+let startingServers = false;
+
+/** True when something is already listening there. */
+function portAnswers(port, timeoutMs = 1200) {
+	return new Promise(resolve => {
+		const socket = net.connect({ host: '127.0.0.1', port });
+		const done = answered => {
+			socket.destroy();
+			resolve(answered);
+		};
+		socket.setTimeout(timeoutMs);
+		socket.once('connect', () => done(true));
+		socket.once('timeout', () => done(false));
+		socket.once('error', () => done(false));
+	});
+}
+
+/**
+ * How long after a start attempt to treat that provider as already starting.
+ *
+ * A cold Ollama takes a few seconds to open its port, which is longer than
+ * anyone waits before pressing the button again. Without this the second press
+ * sees a closed port and starts a second server.
+ */
+const START_GRACE_MS = 12_000;
+const lastStart = { ollama: 0, lmstudio: 0 };
+
+/** PowerShell's literal string: single quotes, and a quote inside one doubled. */
+const psQuote = text => Q + String(text).split(Q).join(Q + Q) + Q;
+
+/**
+ * Launches a server so that it outlives us, shows nothing, and can be found
+ * again to be stopped. Resolves with the server's own pid, where we can learn
+ * it - that pid is what lets shutdown stop the one we started rather than
+ * every copy on the machine.
+ *
+ * On Windows neither spawn flag gives all of that, and this was measured
+ * rather than assumed: `detached: true` survives the app closing but opens a
+ * console window - with Windows Terminal as the default terminal application,
+ * that is a Terminal window per press, and repeated presses left twenty-one of
+ * them. `detached: false` opens nothing but dies with the app. PowerShell's
+ * Start-Process does both, and -PassThru hands back the pid besides.
+ *
+ * Everywhere else, detaching is the whole story, and the child is its own
+ * process group leader so the group can be signalled later.
+ */
+function launchDetached(name, bin, args) {
+	if (process.platform !== 'win32') {
+		const child = spawn(bin, args, { detached: true, stdio: 'ignore' });
+		child.on('error', err => console.log(`[${name}] could not start: ${err.message}`));
 		child.unref();
+		return Promise.resolve(child.pid);
+	}
+
+	return new Promise(resolve => {
+		const list = args.length ? `-ArgumentList ${args.map(psQuote).join(', ')} ` : '';
+		const child = spawn('powershell.exe', [
+			'-NoProfile', '-NonInteractive', '-Command',
+			`(Start-Process -FilePath ${psQuote(bin)} ${list}-WindowStyle Hidden -PassThru).Id`,
+		], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+
+		let out = '';
+		child.stdout.on('data', c => { out += c; });
+		// An 'error' event with no listener is thrown by EventEmitter, and in the
+		// main process that is an uncaught exception that takes the window with it.
+		child.on('error', err => {
+			console.log(`[${name}] could not start: ${err.message}`);
+			resolve(undefined);
+		});
+		child.on('close', () => {
+			const pid = Number(out.trim().split(/\r?\n/).pop());
+			resolve(Number.isInteger(pid) && pid > 0 ? pid : undefined);
+		});
+	});
+}
+
+/** Ends a process and everything it started. */
+function killTree(pid) {
+	return new Promise(resolve => {
+		if (!pid) {
+			resolve();
+		return;
+		}
+		try {
+			if (process.platform === 'win32') {
+				// A plain kill leaves the model runners behind; /T takes the tree.
+				const t = spawn('taskkill', ['/pid', String(pid), '/f', '/t'], { windowsHide: true });
+				t.on('error', () => resolve());
+				t.on('close', () => resolve());
+				return;
+			}
+			// Negative pid: the whole group, which detached made this process lead.
+			process.kill(-pid, 'SIGTERM');
+		} catch {
+			/* already gone, which is the outcome we wanted */
+		}
+		resolve();
+	});
+}
+
+/**
+ * Stops the servers this copy started, and only those.
+ *
+ * Ollama is a process we know the pid of. LM Studio is stopped through its own
+ * CLI, because `lms server start` did not give us a server process to hold -
+ * it asked LM Studio to start one, and `lms server stop` is the matching ask.
+ */
+async function stopOurServers() {
+	const jobs = [];
+
+	if (speechChild && !speechChild.killed) {
+		const child = speechChild;
+		speechChild = null;
+		jobs.push(killTree(child.pid));
+	}
+
+	if (ourServers.ollama) {
+		jobs.push(killTree(ourServers.ollama.pid));
+		ourServers.ollama = undefined;
+	}
+
+	if (ourServers.lmstudio) {
+		const bin = ourServers.lmstudio.bin;
+		ourServers.lmstudio = undefined;
+		jobs.push(new Promise(resolve => {
+			try {
+				const stop = spawn(bin, ['server', 'stop'], { stdio: 'ignore', windowsHide: true });
+				stop.on('error', () => resolve());
+				stop.on('close', () => resolve());
+			} catch {
+				resolve();
+			}
+		}));
+	}
+
+	// Quitting must not hang on a server that will not go quietly.
+	await Promise.race([
+		Promise.allSettled(jobs),
+		new Promise(resolve => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
+	]);
+}
+/** Starts one provider, or explains why it did not. */
+async function startServer(name) {
+	const spec = SERVERS[name];
+
+	// Already up, or started so recently that its port has not opened yet.
+	// Starting it anyway is what turns a slow start into a pile of processes.
+	if (Date.now() - lastStart[name] < START_GRACE_MS) {
+		return { name, ok: true, already: true };
+	}
+	// Someone else's server. We use it, we do not adopt it - and on the way out
+	// we leave it exactly as we found it.
+	if (await portAnswers(SERVER_PORTS[name])) {
+		return { name, ok: true, already: true };
+	}
+
+	const bin = await spec.find();
+	if (!bin) {
+		return { name, ok: false, error: `${spec.label} is not installed.` };
+	}
+
+	lastStart[name] = Date.now();
+
+	try {
+		if (spec.stays) {
+			// `ollama serve` IS the server, so its pid is the thing to remember.
+			const pid = await launchDetached(name, bin, spec.args);
+			if (!pid) {
+				return { name, ok: false, error: `${spec.label} did not start.` };
+			}
+			ourServers[name] = { pid, bin };
+			return { name, ok: true };
+		}
+
+		// `lms server start` is a control command: it asks LM Studio to bring a
+		// server up and returns at once, so there is no server process of ours
+		// to hold on to - only the matching `lms server stop` to ask later.
+		const child = spawn(bin, spec.args, { stdio: 'ignore', windowsHide: true });
+		// An 'error' event with no listener is thrown by EventEmitter, and in the
+		// main process that is an uncaught exception that takes the window with
+		// it. The try/catch around spawn() cannot see it: spawn has returned.
+		child.on('error', err => console.log(`[${name}] could not start: ${err.message}`));
+		child.on('exit', code => {
+			if (code) {
+				console.log(`[${name}] launcher exited with ${code}`);
+			}
+		});
+		child.unref();
+
+		ourServers[name] = { bin };
+		return { name, ok: true };
+	} catch (err) {
+		return { name, ok: false, error: err.message };
+	}
+}
+/**
+ * Starts every model server this machine has that is not already running.
+ *
+ * One button rather than one per provider. Someone with both installed wants
+ * both sets of models in the picker, and has no reason to care which of them
+ * happens to be running - so the app brings up whatever it finds.
+ */
+ipcMain.handle('setup:startServers', async (_event, only) => {
+	if (startingServers) {
+		return { ok: true, already: true, results: [] };
+	}
+
+	startingServers = true;
+	try {
+		// Named providers, or all of them. Starting one is the normal case at
+		// launch: the model you were last using needs its own server and not
+		// the other one, and loading both would cost gigabytes to no purpose.
+		const wanted = Array.isArray(only) ? only.filter(n => SERVERS[n]) : [];
+		const names = wanted.length ? wanted : Object.keys(SERVERS);
+		const results = [];
+		for (const name of names) {
+			results.push(await startServer(name));
+		}
+
+		// Installed-but-absent is not a failure worth reporting as one: having
+		// only Ollama, or only LM Studio, is the normal case.
+		const usable = results.filter(r => r.ok);
+		return {
+			ok: usable.length > 0,
+			results,
+			starting: usable.map(r => r.name),
+			error: usable.length ? undefined : results.map(r => r.error).filter(Boolean).join(' '),
+		};
+	} finally {
+		startingServers = false;
+	}
+});
+
+/**
+ * Starts the optional speech server.
+ *
+ * Separate from the model servers because it is optional, because it is ours
+ * rather than someone else's product, and because its first run downloads a
+ * few hundred megabytes of Whisper weights - which is the whole reason the
+ * renderer needs to be able to tell 'starting' from 'hung'.
+ */
+ipcMain.handle('setup:startSpeech', async () => {
+	if (await portAnswers(SPEECH_PORT)) {
+		return { ok: true, already: true };
+	}
+
+	const python = await resolvePython();
+	if (!python) {
+		return { ok: false, error: 'Python 3 is needed for voice, and was not found.' };
+	}
+
+	try {
+		await fs.access(SPEECH_SCRIPT);
+	} catch {
+		return { ok: false, error: 'The speech server is not installed.' };
+	}
+
+	try {
+		// stderr is kept, not ignored: the server logs 'loading model (first
+		// use)' and its import failures there, and both are the difference
+		// between a useful message and a spinner that never stops.
+		const child = spawn(python.cmd, [...python.args, '-X', 'utf8', '-u', SPEECH_SCRIPT], {
+			stdio: ['ignore', 'ignore', 'pipe'],
+			windowsHide: true,
+		});
+
+		child.on('error', err => console.log(`[speech] could not start: ${err.message}`));
+		child.stderr.on('data', chunk => {
+			const text = String(chunk).trim();
+			if (text) {
+				console.log(`[speech] ${text}`);
+				speechLog = `${speechLog}${text}\n`.slice(-4000);
+			}
+		});
+		child.on('exit', code => {
+			console.log(`[speech] exited with ${code}`);
+			if (speechChild === child) {
+				speechChild = null;
+			}
+		});
+
+		speechChild = child;
 		return { ok: true };
 	} catch (err) {
 		return { ok: false, error: err.message };
 	}
 });
+
+/** Whatever the speech server has said on stderr, for reporting a failed start. */
+ipcMain.handle('setup:speechLog', () => speechLog);
 
 /** Opens a URL in the real browser - never inside this window. */
 ipcMain.handle('setup:openUrl', async (_event, url) => {

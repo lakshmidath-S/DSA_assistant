@@ -73,27 +73,59 @@ export function pythonHelp(platform) {
 export async function probe() {
 	const base = await window.studio.probe();
 
-	for (const provider of ['lmstudio', 'ollama']) {
+	// Every provider, not just the first one that answers.
+	//
+	// This used to stop at the first reachable server, so someone running both
+	// LM Studio and Ollama only ever saw one set of models - and which set
+	// depended on the order of this list. That was invisible while the header
+	// merely named the model in use; it became wrong the moment the header
+	// turned into a picker, which implies it is showing you everything you have.
+	//
+	// Asked in parallel: when neither is running, both fail fast, and doing it
+	// in sequence would make the checklist wait for two timeouts instead of one.
+	const answered = await Promise.all(['lmstudio', 'ollama'].map(async provider => {
 		try {
 			const found = await listModels(provider);
-			const models = found.map(m => m.name);
-			const sizes = Object.fromEntries(
-				found.filter(m => m.params !== undefined).map(m => [m.name, m.params]),
-			);
-			// Reachable but empty is still the provider to talk to, once it has
-			// a model - so this returns either way rather than trying the next.
-			return { ...base, provider, models, sizes };
+			return {
+				provider,
+				models: found.map(m => m.name),
+				sizes: Object.fromEntries(
+					found.filter(m => m.params !== undefined).map(m => [m.name, m.params]),
+				),
+			};
 		} catch {
-			/* not up; try the next */
+			return undefined; // not up
 		}
-	}
+	}));
 
-	return { ...base, provider: undefined, models: [], sizes: {} };
+	const servers = answered.filter(Boolean);
+
+	// The primary is the first server that can actually answer a question. One
+	// that is running but has nothing loaded is still worth reporting, because
+	// the checklist offers to download into it.
+	const primary = servers.find(s => s.models.length) ?? servers[0];
+
+	return {
+		...base,
+		servers,
+		provider: primary?.provider,
+		models: primary?.models ?? [],
+		sizes: primary?.sizes ?? {},
+	};
 }
 
-/** True when the machine is ready to explain an error. */
+/**
+ * True when the machine is ready to explain an error.
+ *
+ * Any one server with any one model is enough. The checklist stays up while
+ * another is installed but not started, so the "Start models" button remains
+ * reachable rather than vanishing the moment the first server answers.
+ */
 export function isReady(state) {
-	return Boolean(state.python?.ok && state.provider && state.models.length);
+	const stocked = (state.servers ?? []).some(s => s.models.length);
+	const installed = [state.ollamaPath, state.lmsPath].filter(Boolean).length;
+	const running = (state.servers ?? []).length;
+	return Boolean(state.python?.ok && stocked && running >= installed);
 }
 
 /**
@@ -149,18 +181,35 @@ export async function pullModel(id, onProgress, signal) {
 	}
 }
 
-/** Waits for a provider to answer, so "Start" can report success honestly. */
-export async function waitForProvider(provider, timeoutMs = 20000) {
+/**
+ * Waits for the given providers to answer, so "Start" can report honestly.
+ *
+ * Returns the ones that came up, which is not always all of them: LM Studio's
+ * server is listening within a second, while a cold Ollama can take several,
+ * and one of the two failing should not hide the other succeeding.
+ */
+export async function waitForProviders(providers, timeoutMs = 20000) {
 	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		try {
-			await listModels(provider);
-			return true;
-		} catch {
+	const up = new Set();
+
+	while (Date.now() < deadline && up.size < providers.length) {
+		await Promise.all(providers
+			.filter(p => !up.has(p))
+			.map(async p => {
+				try {
+					await listModels(p);
+					up.add(p);
+				} catch {
+					/* not up yet */
+				}
+			}));
+
+		if (up.size < providers.length) {
 			await new Promise(r => setTimeout(r, 700));
 		}
 	}
-	return false;
+
+	return [...up];
 }
 
 export function formatBytes(n) {
