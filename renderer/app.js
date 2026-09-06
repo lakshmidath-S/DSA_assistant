@@ -11,13 +11,14 @@
 
 import { parseTraceback, describe, hintFor } from './errors.js';
 import {
-	PROVIDERS, listModels, pickDefaultModel, buildPrompt, chat, stripReasoning,
+	PROVIDERS, pickDefaultServer, buildPrompt, chat, stripReasoning,
 	SYSTEM_PROMPT, SYSTEM_PROMPT_REVEAL, SYSTEM_PROMPT_ASK,
 	SYSTEM_PROMPT_COMPLEXITY, SYSTEM_PROMPT_OPTIMISE, buildAskPrompt,
+	SYSTEM_PROMPT_SUMMARY, buildSummaryPrompt, pickSmallestModel,
 } from './ai.js';
 import { Voice } from './voice.js';
 import { render, escapeHtml } from './markdown.js';
-import { probe, isReady, pullModel, waitForProvider, SUGGESTED, pythonHelp, formatBytes } from './setup.js';
+import { probe, isReady, pullModel, waitForProviders, SUGGESTED, pythonHelp, formatBytes } from './setup.js';
 
 /** Blank, deliberately. The empty-state hint carries the guidance instead. */
 const STARTER = '';
@@ -25,7 +26,7 @@ const STARTER = '';
 const $ = id => document.getElementById(id);
 
 const els = {
-	run: $('run'), stop: $('stop'), status: $('status'), model: $('model'), mic: $('mic'),
+	run: $('run'), stop: $('stop'), status: $('status'), mic: $('mic'),
 	out: $('out'), card: $('card'), okCard: $('ok-card'), okMeta: $('ok-meta'),
 	errType: $('err-type'), errHint: $('err-hint'), errLine: $('err-line'),
 	explain: $('explain'), ask: $('ask'), aiMeta: $('ai-meta'), jump: $('jump'),
@@ -33,6 +34,7 @@ const els = {
 	empty: $('empty'), okOut: $('ok-out'),
 	splitter: $('splitter'), outEmpty: $('out-empty'),
 	setup: $('setup'), setupSteps: $('setup-steps'), setupRecheck: $('setup-recheck'),
+	setupBanner: $('setup-banner'), setupBannerNote: $('setup-banner-note'),
 	diffCard: $('diff-card'), diffWant: $('diff-want'), diffGot: $('diff-got'),
 	diffExplain: $('diff-explain'), diffAsk: $('diff-ask'), diffMeta: $('diff-meta'),
 	expect: $('expect'), expectToggle: $('expect-toggle'),
@@ -42,6 +44,9 @@ const els = {
 	threadClear: $('thread-clear'), selChip: $('sel-chip'), selText: $('sel-text'),
 	selClear: $('sel-clear'),
 	values: $('values'), valuesRows: $('values-rows'),
+	settingsOpen: $('settings-open'), settingsClose: $('settings-close'),
+	settings: $('settings'), settingsServers: $('settings-servers'),
+	modelLabel: $('model-label'),
 	problem: $('problem'), problemToggle: $('problem-toggle'),
 	traceCard: $('trace-card'), traceToggle: $('trace-toggle'), traceBody: $('trace-body'),
 	traceCount: $('trace-count'), traceScrub: $('trace-scrub'), tracePrev: $('trace-prev'),
@@ -132,7 +137,7 @@ window.monacoLoaded.then(async () => {
 	rememberBox(els.problem, els.problemToggle, 'problem');
 	rememberBox(els.expect, els.expectToggle, 'expected');
 	restoreThread();
-	await refreshSetup();
+	await bootModels();
 });
 
 /** The hint is for an empty file only; once there is code it would be in the way. */
@@ -477,17 +482,31 @@ els.ask.addEventListener('click', () => explain());
 els.reveal.addEventListener('click', () => explain(undefined, 'error', true));
 els.diffReveal.addEventListener('click', () => explain(undefined, 'diff', true));
 
-// --- voice --------------------------------------------------------------------
+// --- voice ----------------------------------------------------------------
+//
+// One click starts recording, the next stops it, and every step after that
+// says what it is doing. The old version held the key down, sent the
+// transcript to explain() - which does nothing at all when there has been no
+// run to explain - and wrote its errors into an overlay it had already
+// hidden. So a failure and a success looked identical: nothing.
+//
+// Now the question goes into the thread like any other, where the answer
+// streams in visibly and is kept.
 
 const LABELS = {
-	listening: 'Listening — release to send',
+	checking: 'Checking the speech server…',
+	starting: 'Starting the speech server…',
+	listening: 'Listening — click the microphone again to send',
 	transcribing: 'Transcribing…',
 	thinking: 'Thinking…',
 	speaking: 'Speaking…',
 };
 
+/** Sticky states: an error stays until it is read and dismissed. */
+let voiceError = false;
+
 const voice = new Voice(els.wave, (state, detail) => {
-	if (state === 'idle') {
+	if (state === 'idle' && !voiceError) {
 		els.overlay.hidden = true;
 		els.mic.classList.remove('live');
 		return;
@@ -497,63 +516,140 @@ const voice = new Voice(els.wave, (state, detail) => {
 	els.voiceState.textContent = detail ?? LABELS[state] ?? state;
 });
 
-let micHeld = false;
+/** Shows a message that does not disappear on its own. */
+function voiceProblem(message) {
+	voiceError = true;
+	els.overlay.hidden = false;
+	els.mic.classList.remove('live');
+	els.voiceState.textContent = `${message}  (click to dismiss)`;
+}
 
-async function micDown() {
-	if (micHeld) {
+els.overlay.addEventListener('click', () => {
+	if (voiceError) {
+		voiceError = false;
+		els.overlay.hidden = true;
+	}
+});
+
+/**
+ * Makes sure the speech server is up, starting it if it is not.
+ *
+ * It is not started with the app: it is optional, and loading Whisper costs
+ * real memory for someone who never presses the button. So the first press of
+ * the session pays for it, and says so rather than appearing to do nothing.
+ */
+async function ensureSpeech() {
+	voice.setState('checking');
+	if (await voice.available()) {
+		return true;
+	}
+
+	voice.setState('starting');
+	const res = await window.studio.startSpeech();
+	if (!res.ok) {
+		voiceProblem(res.error ?? 'Could not start the speech server.');
+		return false;
+	}
+
+	// It binds its port before loading any model, so this is quick even on the
+	// run that goes on to download several hundred megabytes.
+	for (let i = 0; i < 30; i++) {
+		if (await voice.available()) {
+			return true;
+		}
+		voice.setState('starting', `Starting the speech server… ${i + 1}s`);
+		await new Promise(r => setTimeout(r, 1000));
+	}
+
+	// It never came up. Its own stderr is the only thing that knows why -
+	// usually a missing Python package.
+	const log = (await window.studio.speechLog()) ?? '';
+	const last = log.trim().split('\n').filter(Boolean).pop();
+	voiceProblem(last
+		? `The speech server did not start: ${last}`
+		: 'The speech server did not start. Run: pip install -r servers/requirements.txt');
+	return false;
+}
+
+/** True while the microphone is open, so the button knows which half it is on. */
+let recording = false;
+let recordingTimer;
+
+async function startRecording() {
+	voiceError = false;
+	if (!ai.provider) {
+		voiceProblem('No model is running, so there would be nothing to answer you.');
 		return;
 	}
-	micHeld = true;
+	if (!await ensureSpeech()) {
+		return;
+	}
+
 	try {
 		await voice.start();
 	} catch (err) {
-		micHeld = false;
-		els.voiceState.textContent = err.message;
-	}
-}
-
-async function micUp() {
-	if (!micHeld) {
+		voiceProblem(err.message);
 		return;
 	}
-	micHeld = false;
+
+	recording = true;
+	// A counter, so a long question still looks like it is being recorded.
+	const began = Date.now();
+	recordingTimer = setInterval(() => {
+		const seconds = Math.round((Date.now() - began) / 1000);
+		voice.setState('listening', `${LABELS.listening}  ${seconds}s`);
+	}, 1000);
+}
+
+async function stopRecordingAndAsk() {
+	recording = false;
+	clearInterval(recordingTimer);
+
+	let said;
 	try {
-		const said = await voice.stop();
-		if (!said) {
-			return;
-		}
-		voice.setState('thinking', `“${said}”`);
-		els.overlay.hidden = false;
-		const answer = await explain(said);
-		els.overlay.hidden = true;
-		if (answer) {
-			voice.speak(stripReasoning(answer).split('\n')[0]);
-		}
+		said = await voice.stop();
 	} catch (err) {
-		els.voiceState.textContent = err.message;
-		setTimeout(() => { els.overlay.hidden = true; }, 2500);
+		voiceProblem(err.message);
+		return;
+	}
+
+	if (!said) {
+		voiceProblem('Nothing was recorded. Say something after the waveform appears.');
+		return;
+	}
+
+	// Show what it heard before acting on it: a wrong transcription otherwise
+	// produces a confusing answer with no visible cause.
+	voice.setState('thinking', `${LQ}${said}${RQ}`);
+	await new Promise(r => setTimeout(r, 900));
+	els.overlay.hidden = true;
+	els.mic.classList.remove('live');
+
+	// Into the thread, where the answer streams in and stays. explain() was the
+	// wrong target: it answers about the last run, and does nothing when there
+	// has not been one.
+	const answer = await ask(said);
+	if (answer) {
+		voice.speak(stripReasoning(answer).split('\n')[0]);
 	}
 }
 
-els.mic.addEventListener('mousedown', micDown);
-els.mic.addEventListener('mouseup', micUp);
-els.mic.addEventListener('mouseleave', () => micHeld && micUp());
+async function toggleMic() {
+	if (recording) {
+		await stopRecordingAndAsk();
+	} else {
+		await startRecording();
+	}
+}
+
+els.mic.addEventListener('click', toggleMic);
 
 window.addEventListener('keydown', e => {
 	if (e.ctrlKey && e.altKey && e.code === 'KeyV' && !e.repeat) {
 		e.preventDefault();
-		micDown();
+		toggleMic();
 	}
 });
-
-window.addEventListener('keyup', e => {
-	if (e.code === 'KeyV' || !e.ctrlKey || !e.altKey) {
-		if (micHeld) {
-			micUp();
-		}
-	}
-});
-
 // --- resizing and zoom ---------------------------------------------------------
 
 /*
@@ -639,18 +735,43 @@ window.addEventListener('keyup', e => {
 
 let setupState;
 
-async function refreshSetup() {
+/** True while a start is in flight, so a rebuilt button knows not to start another. */
+let startingServers = false;
+
+/**
+ * One refresh at a time.
+ *
+ * Every button in the checklist ends by refreshing it, and a refresh rebuilds
+ * every button - so overlapping calls race on the same list, each rendering
+ * over the last and leaving its own probe outstanding. A caller that asks
+ * during a refresh gets that refresh rather than starting a second one.
+ */
+let setupInFlight;
+
+function refreshSetup() {
+	setupInFlight ??= doRefreshSetup().finally(() => {
+		setupInFlight = undefined;
+	});
+	return setupInFlight;
+}
+
+async function doRefreshSetup() {
 	setupState = await probe();
 
-	if (setupState.provider && setupState.models.length) {
-		ai.provider = setupState.provider;
-		// A remembered choice beats the default, but only while it is still
-		// installed - a model can be deleted between sessions.
-		const remembered = readSetting('model');
-		ai.model = setupState.models.includes(remembered)
-			? remembered
-			: pickDefaultModel(setupState.models, setupState.sizes);
-		paintModels(setupState.models);
+	const servers = setupState.servers ?? [];
+	// A remembered choice beats the default, but only while that exact model is
+	// still on that exact server: either can be deleted between sessions, and
+	// the server it was on can simply not be running today.
+	const remembered = readModelChoice();
+	const choice = remembered && servers.some(s =>
+		s.provider === remembered.provider && s.models.includes(remembered.model))
+		? remembered
+		: pickDefaultServer(servers);
+
+	if (choice) {
+		ai.provider = choice.provider;
+		ai.model = choice.model;
+		paintModelLabel();
 		els.ask.disabled = false;
 		els.diffAsk.disabled = false;
 		els.reveal.disabled = false;
@@ -658,7 +779,8 @@ async function refreshSetup() {
 		setAskEnabled(true);
 	} else {
 		ai.provider = undefined;
-		paintModels([]);
+		ai.model = undefined;
+		paintModelLabel();
 		els.ask.disabled = true;
 		els.diffAsk.disabled = true;
 		els.reveal.disabled = true;
@@ -667,9 +789,62 @@ async function refreshSetup() {
 	}
 
 	renderSetup(setupState);
-	els.setup.hidden = isReady(setupState);
+
+	// The checklist lives in Settings, so the panel carries only a pointer to
+	// it - and only while there is something left to do.
+	const ready = isReady(setupState);
+	els.setupBanner.hidden = ready;
+	if (!ready) {
+		els.setupBannerNote.textContent = !setupState.python?.ok
+			? 'Python 3 was not found'
+			: (setupState.servers ?? []).some(s => s.models.length)
+				? 'A model server is installed but not started'
+				: 'No model is available yet';
+	}
+
+	if (!els.settings.hidden) {
+		renderSettings();
+	}
 }
 
+/**
+ * Brings up the model server you were last using, before anything asks for it.
+ *
+ * Only that one. Both servers at once costs gigabytes of weights for a choice
+ * you have already made, and the other is started the moment you pick
+ * something on it in Settings.
+ *
+ * The first run has no choice to honour, so it starts whatever is installed,
+ * looks at everything that answers, and takes the best of it - which is then
+ * the remembered choice for every run after.
+ */
+async function bootModels() {
+	const remembered = readModelChoice();
+
+	els.status.textContent = remembered
+		? `Starting ${PROVIDERS[remembered.provider]?.label ?? remembered.provider}…`
+		: 'Looking for a model…';
+
+	try {
+		const only = remembered ? [remembered.provider] : undefined;
+		const res = await window.studio.startServers(only);
+		if (res?.starting?.length) {
+			await waitForProviders(res.starting, 25000);
+		}
+	} catch {
+		// The checklist will show what is missing; a failed autostart is not
+		// worth a dialog on the way in.
+	}
+
+	els.status.textContent = '';
+	await refreshSetup();
+
+	// First run: whatever we picked is now the remembered choice, so the next
+	// launch starts one server instead of all of them.
+	if (!remembered && ai.provider && ai.model) {
+		rememberModelChoice(ai.provider, ai.model);
+	}
+}
 function readSetting(key) {
 	try {
 		return localStorage.getItem(key) ?? '';
@@ -679,44 +854,158 @@ function readSetting(key) {
 }
 
 /**
- * Fills the model picker.
+ * Separates the server from the model in a remembered choice.
  *
- * Which model answers is worth changing without leaving the window: the same
- * question costs three seconds on a 1.5B and twenty on a 7B, and which of those
- * is the right trade changes with how stuck you are.
+ * The two together are the choice - the same model can be present in both LM
+ * Studio and Ollama, and a request has to go to one of them. A control
+ * character, because a model name may contain a colon (Ollama tags) or a
+ * slash (LM Studio paths) but never this.
  */
-function paintModels(models) {
-	els.model.textContent = '';
+const PICK_SEP = '\u0001';
 
-	if (!models.length) {
-		const none = document.createElement('option');
-		none.textContent = 'no model yet';
-		els.model.appendChild(none);
-		els.model.disabled = true;
-		return;
-	}
+const encodePick = (provider, model) => `${provider}${PICK_SEP}${model}`;
 
-	for (const name of models) {
-		const option = document.createElement('option');
-		option.value = name;
-		option.textContent = name;
-		els.model.appendChild(option);
+/** The remembered choice, as `{ provider, model }`, or undefined. */
+function readModelChoice() {
+	const saved = readSetting('model');
+	const at = saved.indexOf(PICK_SEP);
+	if (!saved || at === -1) {
+		return undefined;
 	}
-	els.model.disabled = false;
-	els.model.value = ai.model;
-	els.model.title = `${PROVIDERS[ai.provider].label} · ${ai.model}`;
+	return { provider: saved.slice(0, at), model: saved.slice(at + 1) };
 }
 
-els.model.addEventListener('change', () => {
-	ai.model = els.model.value;
-	els.model.title = `${PROVIDERS[ai.provider].label} · ${ai.model}`;
+function rememberModelChoice(provider, model) {
 	try {
-		localStorage.setItem('model', ai.model);
+		localStorage.setItem('model', encodePick(provider, model));
 	} catch {
 		/* the choice just will not survive a restart */
 	}
-});
+}
 
+/** The bar shows what is answering; everything about changing it is in Settings. */
+function paintModelLabel() {
+	els.modelLabel.textContent = ai.model ?? 'no model yet';
+	els.settingsOpen.title = ai.model
+		? `${PROVIDERS[ai.provider].label} · ${ai.model}  (Settings)`
+		: 'No model is running  (Settings)';
+}
+
+/**
+ * Draws the model list in Settings, one block per server.
+ *
+ * A server that is not running still gets a block, with the button that starts
+ * it. That is the whole point of doing this here rather than in a dropdown:
+ * only the server holding your model needs to be up, and the other one is
+ * started at the moment you ask for something on it, not before.
+ */
+function renderSettings() {
+	els.settingsServers.textContent = '';
+
+	const servers = setupState?.servers ?? [];
+	const installed = {
+		ollama: Boolean(setupState?.ollamaPath),
+		lmstudio: Boolean(setupState?.lmsPath),
+	};
+
+	for (const provider of ['lmstudio', 'ollama']) {
+		const server = servers.find(s => s.provider === provider);
+		if (!server && !installed[provider]) {
+			continue;   // not installed; nothing useful to say about it
+		}
+
+		const block = document.createElement('div');
+		block.className = 'server';
+
+		const head = document.createElement('div');
+		head.className = 'server-head';
+		const name = document.createElement('span');
+		name.className = 'server-name';
+		name.textContent = PROVIDERS[provider].label;
+		const state = document.createElement('span');
+		state.className = 'server-state';
+		state.textContent = server
+			? `${server.models.length} model${server.models.length === 1 ? '' : 's'}`
+			: 'not running';
+		head.append(name, state);
+		block.appendChild(head);
+
+		if (server && server.models.length) {
+			const list = document.createElement('div');
+			list.className = 'model-list';
+			for (const model of server.models) {
+				const row = document.createElement('button');
+				row.className = 'model-row';
+				row.textContent = model;
+				if (provider === ai.provider && model === ai.model) {
+					row.classList.add('chosen');
+				}
+				row.addEventListener('click', () => chooseModel(provider, model));
+				list.appendChild(row);
+			}
+			block.appendChild(list);
+		} else if (installed[provider]) {
+			const start = button(`Start ${PROVIDERS[provider].label}`, async () => {
+				start.disabled = true;
+				start.textContent = `Starting…`;
+				const res = await window.studio.startServers([provider]);
+				if (!res.ok) {
+					start.textContent = res.error ?? 'Could not start';
+					start.disabled = false;
+					return;
+				}
+				await waitForProviders([provider]);
+				await refreshSetup();
+				renderSettings();
+			});
+			const row = document.createElement('div');
+			row.className = 'step-actions';
+			row.appendChild(start);
+			block.appendChild(row);
+		}
+
+		els.settingsServers.appendChild(block);
+	}
+
+	if (!els.settingsServers.children.length) {
+		const empty = document.createElement('p');
+		empty.className = 'setting-note';
+		empty.textContent = 'Neither Ollama nor LM Studio is installed. The setup checklist has links.';
+		els.settingsServers.appendChild(empty);
+	}
+}
+
+/** Switches the answering model, and remembers it for next time. */
+function chooseModel(provider, model) {
+	ai.provider = provider;
+	ai.model = model;
+	rememberModelChoice(provider, model);
+	paintModelLabel();
+	renderSettings();
+}
+
+function openSettings() {
+	renderSettings();
+	els.settings.hidden = false;
+}
+
+els.settingsOpen.addEventListener('click', openSettings);
+els.setupBanner.addEventListener('click', () => {
+	openSettings();
+	els.setup.scrollIntoView({ block: 'start' });
+});
+els.settingsClose.addEventListener('click', () => { els.settings.hidden = true; });
+els.settings.addEventListener('click', e => {
+	// Clicking the backdrop closes it; clicking the card does not.
+	if (e.target === els.settings) {
+		els.settings.hidden = true;
+	}
+});
+window.addEventListener('keydown', e => {
+	if (e.key === 'Escape' && !els.settings.hidden) {
+		els.settings.hidden = true;
+	}
+});
 /** One row of the checklist. */
 function step(done, title, note, actions = []) {
 	const li = document.createElement('li');
@@ -777,40 +1066,91 @@ function renderSetup(state) {
 		]));
 	}
 
-	// 2. A model server. Installed-but-not-running is the common case and the
-	//    one we can fix here.
-	if (state.provider) {
-		els.setupSteps.appendChild(step(true, `${PROVIDERS[state.provider].label} is running`));
-	} else if (state.ollamaPath) {
-		const start = button('Start Ollama', async () => {
-			start.disabled = true;
-			start.textContent = 'Starting…';
-			const res = await window.studio.startOllama();
-			if (!res.ok) {
-				start.textContent = res.error ?? 'Could not start';
+	// 2. The model servers. Only the one holding your model is started at
+	//    launch; this offers to start whatever else is installed.
+	const running = (state.servers ?? []).map(s => s.provider);
+	const installed = [
+		state.ollamaPath ? 'ollama' : undefined,
+		state.lmsPath ? 'lmstudio' : undefined,
+	].filter(Boolean);
+	const stopped = installed.filter(p => !running.includes(p));
+	const names = list => list.map(p => PROVIDERS[p].label).join(' and ');
+
+	if (running.length && !stopped.length) {
+		const counts = (state.servers ?? [])
+			.map(s => `${PROVIDERS[s.provider].label}: ${s.models.length}`)
+			.join('   ');
+		els.setupSteps.appendChild(step(true,
+			`${names(running)} ${running.length > 1 ? 'are' : 'is'} running`, counts));
+	} else if (installed.length) {
+		const start = button(startingServers ? 'Starting…' : 'Start models', async () => {
+			// The guard cannot live on the button: renderSetup() empties the list
+			// and builds a new, enabled one on every refresh - including the
+			// refresh this click is about to cause.
+			if (startingServers) {
 				return;
 			}
-			await waitForProvider('ollama');
+			startingServers = true;
+			start.disabled = true;
+			start.textContent = 'Starting…';
+
+			try {
+				const res = await window.studio.startServers();
+				if (!res.ok) {
+					start.textContent = res.error ?? 'Could not start';
+					start.disabled = false;
+					return;
+				}
+				const up = await waitForProviders(res.starting ?? installed);
+				if (!up.length) {
+					// Re-rendering an identical checklist looks exactly like the
+					// click did nothing, which is what earns a second press.
+					start.textContent = 'Started, but not answering yet — try again';
+					start.disabled = false;
+					return;
+				}
+			} catch (err) {
+				// Without this the button sits on "Starting..." for ever and the
+				// reason goes to an unhandled rejection nobody reads.
+				start.textContent = `Could not start: ${err.message}`;
+				start.disabled = false;
+				return;
+			} finally {
+				startingServers = false;
+			}
+
 			await refreshSetup();
 		});
-		els.setupSteps.appendChild(step(false, 'Ollama is installed but not running',
-			'It serves the model on port 11434. Starting it here leaves it running after myIDE closes.',
+		start.disabled = startingServers;
+
+		const title = running.length
+			? `${names(running)} running, ${names(stopped)} not started`
+			: `${names(stopped)} installed but not running`;
+		els.setupSteps.appendChild(step(false, title,
+			'Ollama serves on port 11434, LM Studio on 1234. myIDE stops again whatever it started here when you close it, and leaves anything that was already running alone.',
 			[start]));
 	} else {
 		els.setupSteps.appendChild(step(false, 'No model server',
-			'Ollama is the simplest option: install it, then come back and press Re-check. LM Studio on port 1234 also works.',
+			'Ollama is the simplest option: install it, then come back and press Re-check. LM Studio also works.',
 			[
 				button('Get Ollama', () => window.studio.openUrl('https://ollama.com/download')),
+				button('Get LM Studio', () => window.studio.openUrl('https://lmstudio.ai/download')),
 				button('Re-check', refreshSetup),
 			]));
 	}
 
-	// 3. A model. Only offered for Ollama, which has a download API; LM Studio
-	//    downloads happen in its own window.
-	if (state.provider && state.models.length) {
-		els.setupSteps.appendChild(step(true, `${state.models.length} model${state.models.length === 1 ? '' : 's'} available`,
-			state.models.slice(0, 3).join(', ')));
-	} else if (state.provider === 'ollama') {
+	// 3. A model. Downloading is only offered for Ollama, which has an API for
+	//    it; LM Studio downloads happen in its own window.
+	const total = (state.servers ?? []).reduce((n, s) => n + s.models.length, 0);
+	const ollamaEmpty = (state.servers ?? []).some(s => s.provider === 'ollama' && !s.models.length);
+	if (total) {
+		const across = (state.servers ?? [])
+			.filter(s => s.models.length)
+			.map(s => `${PROVIDERS[s.provider].label}: ${s.models.slice(0, 2).join(', ')}`)
+			.join('   ');
+		els.setupSteps.appendChild(step(true,
+			`${total} model${total === 1 ? '' : 's'} available`, across));
+	} else if (ollamaEmpty) {
 		const bar = document.createElement('div');
 		bar.className = 'bar-track';
 		bar.hidden = true;
@@ -937,6 +1277,74 @@ els.diffAsk.addEventListener('click', () => explain(undefined, 'diff'));
 const history = [];
 const HISTORY_TURNS = 3;
 
+/**
+ * Everything older than the window, folded into a few lines.
+ *
+ * Turns past the window used to be dropped, so a question about something
+ * worked out ten turns ago had nothing behind it. They are summarised instead,
+ * by the smallest model on the server already running - this is bookkeeping,
+ * not teaching, and it should not cost twenty seconds or a second server.
+ *
+ * What it summarises is only ever the CONVERSATION. The code, the traceback,
+ * the recorded values and the trace are facts the app holds exactly and sends
+ * in full on every request; replacing any of those with a small model's
+ * paraphrase is how a hallucination gets manufactured.
+ */
+let historySummary = '';
+let summarising = false;
+
+/** The summary as a message, or nothing when there is no history behind us. */
+function summaryMessages() {
+	return historySummary
+		? [{ role: 'system', content: `EARLIER IN THIS CONVERSATION, in note form:\n${historySummary}` }]
+		: [];
+}
+
+/**
+ * Folds the turns that have fallen out of the window into the summary.
+ *
+ * Runs after an answer, never in front of one: the reader is not kept waiting
+ * for bookkeeping. If it fails the raw turns stay where they are - an
+ * uncompressed history is only wasteful, whereas a dropped one loses the
+ * thread.
+ */
+async function compressHistory() {
+	const excess = history.length - HISTORY_TURNS * 2;
+	if (summarising || excess <= 0 || !ai.provider) {
+		return;
+	}
+
+	const older = history.slice(0, excess);
+	summarising = true;
+
+	try {
+		// The smallest model on the server we are already talking to. Starting
+		// the other one to save a few tokens would be a poor trade.
+		const server = (setupState?.servers ?? []).find(s => s.provider === ai.provider);
+		const model = pickSmallestModel(server?.models ?? [], server?.sizes ?? {}) ?? ai.model;
+
+		const text = await chat({
+			provider: ai.provider,
+			model,
+			messages: [
+				{ role: 'system', content: SYSTEM_PROMPT_SUMMARY },
+				{ role: 'user', content: buildSummaryPrompt(historySummary, older) },
+			],
+		}, () => { });
+
+		const clean = stripReasoning(text).trim();
+		if (clean) {
+			historySummary = clean.slice(0, 1200);
+			history.splice(0, excess);
+			saveThread();
+		}
+	} catch {
+		/* keep the raw turns; they are still sent, just not compressed */
+	} finally {
+		summarising = false;
+	}
+}
+
 /** What is selected right now, in the editor or in an answer. */
 let selection = '';
 
@@ -993,21 +1401,30 @@ const turns = [];
 
 function saveThread() {
 	try {
-		localStorage.setItem(THREAD_KEY, JSON.stringify(turns.slice(-THREAD_MAX)));
+		localStorage.setItem(THREAD_KEY, JSON.stringify({
+			summary: historySummary,
+			turns: turns.slice(-THREAD_MAX),
+		}));
 	} catch {
 		/* a long thread in a full store; the questions still work */
 	}
 }
 
 function restoreThread() {
-	let saved = [];
+	let stored;
 	try {
-		saved = JSON.parse(localStorage.getItem(THREAD_KEY) ?? '[]');
+		stored = JSON.parse(localStorage.getItem(THREAD_KEY) ?? 'null');
 	} catch {
 		return;
 	}
+
+	// Threads written before the summary existed are a bare array.
+	const saved = Array.isArray(stored) ? stored : stored?.turns;
 	if (!Array.isArray(saved)) {
 		return;
+	}
+	if (typeof stored?.summary === 'string') {
+		historySummary = stored.summary;
 	}
 
 	for (const turn of saved.slice(-THREAD_MAX)) {
@@ -1088,6 +1505,8 @@ async function ask(question, mode = 'ask') {
 			signal: aiAbort.signal,
 			messages: [
 				{ role: 'system', content: system },
+				// Everything before the window, in note form.
+				...summaryMessages(),
 				// Earlier turns, so a bare "why?" still has a subject.
 				...history.slice(-HISTORY_TURNS * 2),
 				{
@@ -1117,6 +1536,12 @@ async function ask(question, mode = 'ask') {
 		history.push({ role: 'user', content: question }, { role: 'assistant', content: clean });
 		turns.push({ q: question, scope, a: clean, meta: meta.textContent });
 		saveThread();
+
+		// Deliberately not awaited: the answer is already rendered, and folding
+		// the turns that just fell out of the window is nobody's business but
+		// the next question's.
+		compressHistory();
+		return clean;
 	} catch (err) {
 		if (err.name === 'AbortError') {
 			answer.innerHTML = '<p>Cancelled.</p>';
@@ -1157,6 +1582,7 @@ els.threadClear.addEventListener('click', () => {
 	els.thread.textContent = '';
 	history.length = 0;
 	turns.length = 0;
+	historySummary = '';
 	saveThread();
 });
 

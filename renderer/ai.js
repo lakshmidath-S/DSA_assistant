@@ -95,6 +95,39 @@ export function pickDefaultModel(models, sizes = {}) {
 }
 
 /**
+ * The same choice, made across every server that answered.
+ *
+ * Both can be running at once, and the better model is not always on the one
+ * that replied first. Returns which server owns the winner, because that is
+ * what a request has to be addressed to.
+ */
+export function pickDefaultServer(servers) {
+	const stocked = (servers ?? []).filter(s => s.models?.length);
+	if (!stocked.length) {
+		return undefined;
+	}
+
+	const names = [];
+	const sizes = {};
+	for (const server of stocked) {
+		for (const name of server.models) {
+			names.push(name);
+			// First server to state a size for a name wins; the same model
+			// pulled into both servers is the same model either way.
+			if (!(name in sizes) && server.sizes?.[name] !== undefined) {
+				sizes[name] = server.sizes[name];
+			}
+		}
+	}
+
+	const model = pickDefaultModel(names, sizes);
+	if (!model) {
+		return undefined;
+	}
+	return { provider: stocked.find(s => s.models.includes(model)).provider, model };
+}
+
+/**
  * The installed models, as `{ name, params }`.
  *
  * `params` is the size in billions where the server will say - Ollama reports
@@ -528,6 +561,78 @@ export const SYSTEM_PROMPT_OPTIMISE = [
 	'- Under 140 words. No preamble.',
 ].join('\n');
 
+/**
+ * Picks the cheapest model on a server, for work that is not the answer.
+ *
+ * Summarising old turns is bookkeeping, not teaching: it has to be fast and it
+ * has to be faithful, and a 1.5B is fine at copying facts from text in front of
+ * it. It is only trusted with the things it cannot get wrong - which is why the
+ * summary never reaches the reader and never replaces the code, the traceback
+ * or the trace, all of which are sent in full every time regardless.
+ */
+export function pickSmallestModel(models, sizes = {}) {
+	const fromName = id => {
+		const m = /(\d+(?:\.\d+)?)\s*b\b/i.exec(id);
+		return m ? Number(m[1]) : undefined;
+	};
+
+	const sized = models
+		.filter(m => !/embed/i.test(m))
+		.map(model => ({ model, b: sizes[model] ?? fromName(model) }))
+		.filter(c => c.b !== undefined)
+		.sort((a, b) => a.b - b.b);
+
+	return sized[0]?.model;
+}
+
+/*
+ * Compressing the conversation.
+ *
+ * Only the last few turns are sent - a small model has little context to spare,
+ * and old turns crowd out the code. Everything past that used to be dropped, so
+ * a question about something worked out ten turns ago had nothing behind it.
+ *
+ * The rule that matters: this summarises the CONVERSATION, never the code or
+ * the run. Those are facts the app holds exactly and sends in full each time.
+ * Handing a model its own paraphrase of a traceback instead of the traceback is
+ * how you manufacture a hallucination, so the summary is confined to what was
+ * asked and what was concluded.
+ */
+export const SYSTEM_PROMPT_SUMMARY = [
+	'You keep notes on a conversation between a tutor and someone learning data',
+	'structures and algorithms. You are not part of that conversation.',
+	'',
+	'Rules:',
+	'- Write a compact factual record of what was asked and what was concluded.',
+	'- Keep the specifics a later question might refer back to: the bug that was',
+	'  found, the complexity that was established, the approach that was ruled out.',
+	'- Keep their own words for anything they claimed or decided.',
+	'- Do NOT add anything that is not in the notes you were given. No advice, no',
+	'  corrections, no code, no speculation about what they meant.',
+	'- If something is unclear, leave it out rather than guessing at it.',
+	'- Under 120 words, plain sentences, no headings.',
+].join('\n');
+
+/** The old summary plus the turns now falling out of the window. */
+export function buildSummaryPrompt(previous, messages) {
+	const parts = [];
+
+	if (previous && previous.trim()) {
+		parts.push('THE NOTES SO FAR:', previous.trim(), '');
+	}
+
+	parts.push('NEWLY OLD TURNS, oldest first:');
+	for (const message of messages) {
+		const who = message.role === 'user' ? 'They asked' : 'The tutor answered';
+		parts.push(`${who}: ${String(message.content ?? '').slice(0, 1200)}`, '');
+	}
+
+	parts.push(previous && previous.trim()
+		? 'Rewrite the notes so they cover the turns above as well. Keep it under 120 words.'
+		: 'Write the notes. Keep them under 120 words.');
+
+	return parts.join('\n');
+}
 /**
  * A follow-up question, optionally about a selected fragment.
  *

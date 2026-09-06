@@ -47,7 +47,10 @@ quieter button rather than the default.
   want it.
 - **Ask follow-ups.** The box at the bottom of the panel takes any question
   about your code, and remembers the last few exchanges, so a bare "why?" still
-  has a subject. Answers stack as notes, not as a chat transcript.
+  has a subject. Answers stack as notes, not as a chat transcript. Turns older
+  than that window are not dropped - they are folded into a short factual note
+  by the smallest model on the server already running, so a question about
+  something settled ten turns ago still has it behind it.
 - **Select first to narrow the question.** Highlight part of your code — or part
   of an answer — and a chip appears showing what the question is about. "Why is
   this O(n²)?" needs to know which part *this* is.
@@ -55,11 +58,21 @@ quieter button rather than the default.
   code, which loop causes what, and whether a bound is amortised.
 - **Can it be faster?** gives your current complexity and the best achievable,
   then names the technique that closes the gap and why it removes the cost.
-- Push to talk on <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>, with a live
-  waveform (needs the speech server, below).
-- **Pick the model** from the title bar. A 1.5B answers in seconds and a 7B
-  takes a minute; which is the right trade changes with how stuck you are. The
-  choice is remembered.
+- **Talk to it.** Click the microphone (or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>)
+  to start recording with a live waveform, click again to send. What it heard is
+  shown before it is acted on, then the question goes into the thread like any
+  other and the answer streams in. Every step names itself and counts its
+  seconds; nothing fails silently.
+- **Settings** (the gear on the title bar, which also shows what is answering)
+  holds the setup checklist and the model list. Every model on every running
+  server is listed under its server; choosing one switches to that server, and
+  starts it if it is not running.
+- **It starts itself.** On launch myIDE starts the one server your last model
+  belongs to - not both, which would cost gigabytes for a choice you have
+  already made - and selects that model. The first run has nothing to go on, so
+  it starts what is installed, takes the best model it finds, and remembers it.
+  Everything it started is stopped again when you close the app; anything that
+  was already running is left alone.
 - The question thread, the problem and the expected output all survive a
   restart, along with the code.
 - Drag the divider to resize; <kbd>Ctrl</kbd>+<kbd>+</kbd>/<kbd>-</kbd> for font
@@ -79,7 +92,7 @@ covers the rest:
 | It finds | It does |
 | --- | --- |
 | Python missing | Links to the right installer for your platform |
-| Ollama installed but stopped | **Start Ollama** — starts it and waits for the port |
+| A model server installed but stopped | **Start models** — starts every one it finds, Ollama and LM Studio, waits for their ports, and stops them again when myIDE closes |
 | Ollama not installed | Links to the download |
 | No model downloaded | **Download** with a live progress bar, via Ollama's API |
 
@@ -108,6 +121,14 @@ not the file index, so a Desktop-only shortcut never turns up when you type.
 `servers/voice_server.py` provides speech-to-text and text-to-speech on port
 8756. It needs `pip install -r servers/requirements.txt` (faster-whisper and
 piper-tts) and downloads its own models on first use. The app works without it.
+
+You do not start it yourself: the first press of the microphone starts it and
+says so. That press is also the one that pays for loading Whisper - measured at
+**17.2s** for the first transcription against **4.6s** for every one after, with
+the model already cached, and minutes rather than seconds if it still has to be
+downloaded. The overlay counts the seconds and, when `/health` reports the model
+still loading, says that is what it is waiting for. A silent wait of that length
+is indistinguishable from a crash, which is exactly how this used to fail.
 
 ## Why it teaches instead of answering
 
@@ -362,8 +383,7 @@ the variables panel and the model quoting `graph[9]` from the recorded values;
 session save and restore; asking a follow-up and having a bare "why does that
 make it faster?" answered from the remembered turn; selecting code and seeing the
 question scoped to it; complexity and optimisation answers; clearing the thread;
-the setup checklist rendering with both model servers made unreachable; **Start Ollama** (the process survives the app closing and the
-port comes up); and the model-download stream, by re-pulling a model that was
+the setup checklist rendering with both model servers made unreachable; **Start models** (both servers come up from cold - LM Studio in 0.7s, Ollama in 3.2s - with no console window; both are stopped again on quit, and a server that was already running before myIDE opened is left running); and the model-download stream, by re-pulling a model that was
 already present, which returns the same NDJSON frames as a first download.
 
 Then, for the tracer and what came with it: the step-through on the `two_sum`

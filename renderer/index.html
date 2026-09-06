@@ -25,17 +25,22 @@
 
 		<span class="spacer"></span>
 
-		<button id="mic" class="ghost mic" title="Hold to talk (Ctrl+Alt+V)">
+		<button id="mic" class="ghost mic" title="Click to talk, click again to send (Ctrl+Alt+V)">
 			<svg viewBox="0 0 16 16" aria-hidden="true">
 				<path d="M8 10a2.5 2.5 0 0 0 2.5-2.5v-3a2.5 2.5 0 0 0-5 0v3A2.5 2.5 0 0 0 8 10z" />
 				<path d="M4 7.5a4 4 0 0 0 8 0" fill="none" stroke="currentColor" stroke-width="1.2" />
 				<path d="M8 11.5V14" fill="none" stroke="currentColor" stroke-width="1.2" />
 			</svg>
 		</button>
-		<!-- A picker, not a label: which model answers is the one setting worth
-		     changing while working. A 1.5B that replies in three seconds and a
-		     7B that takes twenty are useful at different moments. -->
-		<select id="model" class="model" title="Model"></select>
+		<!-- The active model, and the way into Settings. Which model answers is
+		     the one setting worth changing while working, so it is on the bar;
+		     everything about choosing it lives behind the button. -->
+		<button id="settings-open" class="model" title="Settings">
+			<svg viewBox="0 0 16 16" aria-hidden="true" class="gear">
+				<path d="M8 5.5A2.5 2.5 0 1 0 8 10.5 2.5 2.5 0 0 0 8 5.5zm6.4 2.5c0-.4 0-.7-.1-1l1.4-1-1.5-2.6-1.7.6a5.9 5.9 0 0 0-1.7-1L10.5 1h-3l-.3 1.9a5.9 5.9 0 0 0-1.7 1l-1.7-.6L2.3 6l1.4 1a6 6 0 0 0 0 2l-1.4 1 1.5 2.6 1.7-.6c.5.4 1.1.8 1.7 1l.3 1.9h3l.3-1.9a5.9 5.9 0 0 0 1.7-1l1.7.6 1.5-2.6-1.4-1c.1-.3.1-.6.1-1z" />
+			</svg>
+			<span id="model-label">no model yet</span>
+		</button>
 	</header>
 
 	<main>
@@ -44,7 +49,7 @@
 			<div id="empty" class="empty" hidden>
 				<p class="empty-title">Write some Python, then press Run.</p>
 				<p class="empty-keys"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> runs it &nbsp;·&nbsp;
-					<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> to ask out loud</p>
+					<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> to ask out loud (click again to send)</p>
 			</div>
 			<div id="voice-overlay" class="voice-overlay" hidden>
 				<canvas id="wave" class="wave"></canvas>
@@ -56,15 +61,13 @@
 
 		<aside class="side">
 			<div class="side-top">
-				<!-- Shown until the machine can actually do the job. -->
-				<section id="setup" class="card setup" hidden>
-					<div class="card-head">
-						<span class="setup-title">Finish setting up</span>
-						<button id="setup-recheck" class="link">re-check</button>
-					</div>
-					<ul id="setup-steps" class="steps"></ul>
-				</section>
-
+				<!-- The checklist itself lives in Settings; this is only the nudge
+				     towards it, and it is here rather than there because a panel you
+				     have to open cannot tell you it needs opening. -->
+				<button id="setup-banner" class="setup-banner" hidden>
+					<span class="setup-banner-title">Finish setting up</span>
+					<span id="setup-banner-note" class="setup-banner-note"></span>
+				</button>
 				<!-- A wrong answer is not a crash, and needs its own card. -->
 				<section id="diff-card" class="card wrong" hidden>
 					<div class="card-head"><span class="err-type wrong">Wrong answer</span></div>
@@ -182,6 +185,35 @@
 			</section>
 		</aside>
 	</main>
+
+	<!-- Settings. One sheet, and for now one thing in it: which model answers,
+	     and which server has to be running for it to. -->
+	<div id="settings" class="sheet" hidden>
+		<div class="sheet-card" role="dialog" aria-modal="true" aria-label="Settings">
+			<div class="sheet-head">
+				<span class="sheet-title">Settings</span>
+				<button id="settings-close" class="ghost small">Done</button>
+			</div>
+
+			<section id="setup" class="card setup" hidden>
+				<div class="card-head">
+					<span class="setup-title">Finish setting up</span>
+					<button id="setup-recheck" class="link">re-check</button>
+				</div>
+				<ul id="setup-steps" class="steps"></ul>
+			</section>
+
+			<section class="setting">
+				<div class="setting-title">Model</div>
+				<p class="setting-note">
+					myIDE starts only the server your chosen model needs, and starts
+					that same one for you next time. Choosing a model on the other
+					server starts it then.
+				</p>
+				<div id="settings-servers" class="servers"></div>
+			</section>
+		</div>
+	</div>
 
 	<!-- Monaco ships an AMD bundle; load it first, then the app as a module. -->
 	<script src="../node_modules/monaco-editor/min/vs/loader.js"></script>

@@ -21,8 +21,14 @@ quieter second button.
 - Follow-up questions with memory of the last three turns; select code or answer
   text to scope a question to it. **The thread now survives a restart.**
 - **Time & space** and **Can it be faster?** as dedicated buttons.
-- Setup checklist: finds Python, starts an installed-but-stopped Ollama, and
-  downloads a model with a progress bar.
+- Settings: the checklist and the model list, with the active model on the bar.
+  The last-used server starts itself on launch and stops on quit.
+- Conversation older than the three-turn window is summarised rather than
+  dropped, by the cheapest model on the server already running.
+- Setup checklist: finds Python, starts every model server it finds that is
+  installed but stopped - Ollama and LM Studio, from one **Start models**
+  button - stops again on quit whatever it started, and downloads a model with
+  a progress bar.
 - Runtime values at a crash, shown in the card and given to the model.
 - **The problem statement**, pasted into its own box, given to the explanation
   and ask prompts so the code is judged against what it was meant to do.
@@ -70,7 +76,11 @@ run time, rather than as plain numbers, would keep the marks honest.
 - **Actually run macOS and Linux.** `install.sh`, the interpreter probing, and
   now the `dmg`/`AppImage` targets are written from documented behaviour and
   have never been executed there.
-- **Voice end to end.** Needs a microphone and a person; never tested.
+- **Voice with a real microphone.** The pipeline is now exercised end to end -
+  the server starting on demand, `/stt` returning the right sentence, the
+  question reaching the thread - but the audio was synthesised with Windows TTS
+  and fed in, not spoken. `getUserMedia`, the waveform and the spoken reply
+  still need a person and a microphone.
 - **The packaged Run button.** The harness was verified from its packaged
   location by invoking it directly, and the renderer was verified from inside
   the asar, but the two have not been exercised together — `STUDIO_SHOT` is
@@ -107,6 +117,68 @@ run time, rather than as plain numbers, would keep the marks honest.
 - **Model sizes come from the server, not the name.** A model pulled under a
   custom tag (`logic:latest`) has no number in its name; Ollama reports
   `parameter_size` per tag and `probe()` passes it through.
+- **On Windows, neither spawn flag gives a hidden server that survives.**
+  Measured, one spawn each, because the obvious fix is wrong:
+
+  | | new console | outlives the app |
+  |---|---|---|
+  | `detached: true` | yes - 1 per spawn | yes |
+  | `detached: false` | no | **no** |
+  | `Start-Process -WindowStyle Hidden` | no | yes |
+
+  `detached: true` means CREATE_NEW_CONSOLE and `windowsHide` cannot suppress
+  it - the flags contradict each other and the console wins. With Windows
+  Terminal as the default terminal application that is a Terminal window per
+  spawn: pressing the button a few times left twenty-one orphaned
+  `OpenConsole.exe` processes and took the machine to 0 FPS. Turning `detached`
+  off fixes the windows and silently breaks the promise the checklist makes,
+  because the server then dies with the app. PowerShell's `Start-Process` is
+  the only one that does both, so that is what `launchDetached` uses on
+  Windows. Elsewhere, plain `detached: true`.
+- **Stop only what you started.** A server that was already running when myIDE
+  opened belongs to whoever started it - someone may be part way through a chat
+  in LM Studio's own window - so shutdown checks the port first and records
+  ownership only when it actually spawned something. `ollama serve` is stopped
+  by pid (`Start-Process -PassThru` hands it back); LM Studio is stopped by
+  asking `lms server stop`, because `lms server start` never gave us a process
+  to hold.
+- **`before-quit` does not wait for you.** The process leaves as soon as the
+  handler returns, so an async shutdown has to `preventDefault()`, do the work,
+  and call `app.quit()` again - with a timeout, so a server that will not die
+  cannot trap the app open.
+- **Summarise the conversation, never the artifacts.** The code, the
+  traceback, the recorded values and the trace are things the app holds exactly
+  and sends in full on every request. Replacing any of them with a small
+  model's paraphrase is how a hallucination gets manufactured, so the
+  summariser only ever sees past questions and answers - and is told to add
+  nothing, and to leave out what it is unsure of.
+- **A wait with no counter reads as a crash.** The first `/stt` of a session
+  loads Whisper: 17.2s measured with the model cached, minutes without. The old
+  UI showed a fixed "Transcribing..." for all of it. `/health` answers during a
+  transcription - the server is threaded - and reports `loaded.stt`, which is
+  what lets the overlay say whether it is transcribing or still loading.
+- **Do not write to an overlay you have just hidden.** Voice errors were set as
+  text on the overlay *after* `setState('idle')` had hidden it, so every failure
+  looked exactly like nothing happening. Error states are sticky now, and are
+  dismissed by clicking them.
+- **`explain()` does nothing without a run.** It answers about the last
+  traceback or diff, so sending a spoken question to it produced silence
+  whenever the file had not been run. Spoken questions go to `ask()`, which
+  needs no run and leaves the answer in the thread.
+- **Take the single-instance lock.** There is one scratch file, one session and
+  one idea of whether a server is being started, and all of them are per
+  process - so a second copy is not a second window, it is a second set of
+  state fighting the first. It is easy to launch by accident, because a busy
+  copy is exactly when someone clicks the shortcut again.
+- **A button that is rebuilt cannot hold its own disabled flag.** `renderSetup`
+  empties the list and makes a new button on every refresh, including the
+  refresh the click itself causes. Guards belong in module state.
+- **`spawn`'s failures do not reach its `try`/`catch`.** They arrive later as an
+  `'error'` event, and an `'error'` event with no listener is thrown - in the
+  main process that ends the app.
+- **Probe every model server, not the first that answers.** Someone can be
+  running LM Studio and Ollama at once; stopping at the first hid half their
+  models, and which half depended on the order of the list.
 - **Do not write to the app's data directory from a spawned child.** Writes into
   `%APPDATA%\myIDE\session` were silently discarded from inside the app while
   identical code wrote fine to the project folder. The harness reports through
