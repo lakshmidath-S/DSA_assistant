@@ -6,14 +6,70 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node test/errors.test.mjs && node test/harness.test.mjs && node test/markdown.test.mjs",
-    "audit": "npm audit --omit=dev"
+    "test": "node test/errors.test.mjs && node test/harness.test.mjs && node test/markdown.test.mjs && node test/ai.test.mjs",
+    "audit": "npm audit --omit=dev",
+    "dist": "electron-builder",
+    "pack": "electron-builder --dir"
   },
   "license": "MIT",
   "devDependencies": {
-    "electron": "^44.2.0"
+    "electron": "^44.2.0",
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "monaco-editor": "^0.52.2"
-  }
+  },
+  "build": {
+    "appId": "dev.myide.studio",
+    "productName": "myIDE",
+    "copyright": "MIT",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "servers/**/*",
+      "!**/*.map",
+      "!node_modules/monaco-editor/dev/**",
+      "!node_modules/monaco-editor/esm/**",
+      "!node_modules/monaco-editor/min-maps/**",
+      "!node_modules/monaco-editor/monaco.d.ts",
+      "!node_modules/monaco-editor/CHANGELOG.md"
+    ],
+    "extraResources": [
+      {
+        "from": "python",
+        "to": "python"
+      }
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development"
+    }
+  },
+  "author": "LordorWhat"
 }

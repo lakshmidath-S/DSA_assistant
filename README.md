@@ -31,9 +31,20 @@ quieter button rather than the default.
   program.
 - When it **runs but prints the wrong thing**, you get an expected-vs-got card
   instead. Fill in *Expected output* and every run is checked against it.
+- **Step through the run.** Every run is traced, crash or no crash, so the panel
+  can walk back through it: drag the scrubber and the marker moves down the
+  editor while the variables fill in beside it — the list growing, the dict
+  filling, the index going one too far. This is the only account of a run that
+  finished and printed the wrong answer, because nothing raised.
+- **Tell it the problem.** Paste the question you are solving into *The problem*
+  and the explanation is judged against what the code was *meant* to do, rather
+  than against what the code looks like it is trying to do — which is circular,
+  since the code is the thing that is wrong.
 - Either way a local model explains it, unprompted — what went wrong and why,
-  never the corrected code. *Explain again* re-asks; *Show the fix* gives the
-  corrected line when you want it.
+  never the corrected code. It is given the traceback, the recorded values and
+  the recorded steps, so it reads facts instead of simulating the program.
+  *Explain again* re-asks; *Show the fix* gives the corrected line when you
+  want it.
 - **Ask follow-ups.** The box at the bottom of the panel takes any question
   about your code, and remembers the last few exchanges, so a bare "why?" still
   has a subject. Answers stack as notes, not as a chat transcript.
@@ -46,8 +57,13 @@ quieter button rather than the default.
   then names the technique that closes the gap and why it removes the cost.
 - Push to talk on <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>, with a live
   waveform (needs the speech server, below).
+- **Pick the model** from the title bar. A 1.5B answers in seconds and a 7B
+  takes a minute; which is the right trade changes with how stuck you are. The
+  choice is remembered.
+- The question thread, the problem and the expected output all survive a
+  restart, along with the code.
 - Drag the divider to resize; <kbd>Ctrl</kbd>+<kbd>+</kbd>/<kbd>-</kbd> for font
-  size. Both persist.
+  size. <kbd>Alt</kbd>+<kbd>←</kbd>/<kbd>→</kbd> steps through the run. All persist.
 
 ## Setting it up
 
@@ -160,6 +176,63 @@ for byte what Python would have printed - running the file through `exec()` adds
 a frame of our own, and an unnormalised path prints forward slashes where Python
 prints backslashes.
 
+### Steps beat values, where there are no values
+
+Recorded locals only exist if something raised. A run that finishes and prints
+the wrong answer — the case this app was extended to cover, and the one people
+actually paste into a cloud chat — raises nothing, so the exception handler sees
+nothing and the model got the source and the two output strings and had to
+simulate the rest.
+
+So the harness also installs `sys.settrace`, filtered to the user's own file,
+and records `(line, the names that changed)`. The wrong-answer prompt carries
+the tail of that, and the panel can scrub through all of it.
+
+Tracing every line is slow, so recording stops at 300 steps by *uninstalling the
+trace function* rather than by continuing to pay for events it will discard. A
+400,000-iteration loop measured the same with tracing as without, to within
+noise. Truncation is then stated in the prompt in as many words, because the
+steps shown are from the middle of a longer run and a model told nothing about
+that will confidently explain a program that ended where the recording did.
+
+Two things fall out of tracing that an exception handler cannot give at all:
+a **caught** exception, which never reaches a traceback and is a real way to
+print a wrong answer; and the value a function actually returned.
+
+Changes are compared by **repr**, not by identity or equality. `graph[u].append(v)`
+mutates a list in place, so the object is the same one it was before and `is`
+sees nothing happen — while the repr, which is what the reader and the model are
+shown, changes.
+
+### What a 1.5B does with all of this
+
+`qwen2.5-coder:1.5b` and a 7.6B were given the same wrong-answer prompt for the
+`two_sum` that returns `[1, 0]` instead of `[0, 1]`, once bare and once with the
+problem statement and the recorded trace:
+
+| | bare | with trace + problem |
+|---|---|---|
+| `qwen2.5-coder:1.5b` | 3.5s | 9.3s |
+| 7.6B (`logic:latest`) | 50.9s | 73.5s |
+
+Speed was never the question. The 1.5B **wrote out the corrected code both
+times**, under a "Here's the corrected line:" heading, which is the one thing
+`SYSTEM_PROMPT` forbids and the whole reason the app exists. It also blamed the
+wrong line twice, and with the trace in hand narrated iterations that never
+happened. The 7.6B named line 6, explained the ordering assumption behind it,
+and closed with a question — the exact shape asked for — both times.
+
+So the 1.5B is not the default, and `pickDefaultModel` now refuses to default to
+anything under 3B while something larger is installed. It had been doing the
+opposite: it considered only names containing "coder", so a 1.5B coder beat a
+7.6B sitting beside it, and nothing looked broken because the panel still
+answered. Sizes now come from what the server reports — Ollama states
+`parameter_size` per tag — because a model pulled under a custom tag has no
+number in its name at all.
+
+The 1.5B is still in the picker. For "what does this error mean" it is genuinely
+the better trade; it just cannot be trusted to hold a rule.
+
 Two details of real tracebacks are easy to get wrong, and both are covered:
 
 - Since 3.11 the marker line mixes `~` and `^` (`return 1 / 0` → `~~^~~`), so
@@ -206,23 +279,44 @@ timeout and process-tree kill are there for runaway loops, not hostile code.
 
 ```
 main.js              Electron shell: finds Python, runs it, owns the scratch file
-python/harness.py    runs the file; reports the variables at a failure
+python/harness.py    runs the file; reports the variables at a failure and
+                     traces the path the run took
 preload.js           the renderer's entire privileged surface
 renderer/
   boot.js            Monaco's AMD bootstrap (separate file - CSP forbids inline)
-  app.js             wiring: run, decorations, setup panel, expected output,
-                     follow-up thread, selection tracking, voice
+  app.js             wiring: run, decorations, setup panel, problem and expected
+                     output, step-through, follow-up thread, selection, voice
   errors.js          traceback -> file, line, marked span
-  ai.js              LM Studio / Ollama streaming, and all five prompts
+  ai.js              LM Studio / Ollama streaming, model choice, and the prompts
   markdown.js        escaping + the little markdown the model is asked for
   setup.js           what this machine has; starting Ollama; downloading a model
   voice.js           push to talk, waveform, explicit states
 servers/             voice_server.py (optional speech)
 test/                traceback cases and harness runs against real Python;
-                     XSS payloads against the answer renderer
+                     XSS payloads against the answer renderer; model choice and
+                     the shape of the prompts
 install.ps1          Windows shortcuts
 install.sh           macOS bundle / Linux .desktop entry
 ```
+
+## Packaging
+
+```
+npm run pack         # dist/win-unpacked - an app directory, no installer
+npm run dist         # an installer for the current platform
+```
+
+Two things about the build are load-bearing:
+
+`python/harness.py` ships as an **extraResource**, not inside the asar. A
+spawned Python process reads through the real filesystem, not Electron's patched
+`fs`, so a harness inside `app.asar` cannot be opened at all. `main.js` looks
+beside the archive when `app.isPackaged`, and inside `__dirname` when it is not.
+
+Monaco is trimmed by exclusion. electron-builder ships every production
+dependency whether or not `files` names it, and `monaco-editor` carries four
+copies of the editor - `dev`, `esm`, `min`, `min-maps` - of which only `min` is
+ever loaded. Excluding the other three takes the asar from 63MB to 14MB.
 
 ## Portability notes
 
@@ -272,10 +366,24 @@ the setup checklist rendering with both model servers made unreachable; **Start 
 port comes up); and the model-download stream, by re-pulling a model that was
 already present, which returns the same NDJSON frames as a first download.
 
-Not exercised: a first-time download of a model that is not already on disk;
-voice end to end, which needs a microphone and a person; and macOS and Linux,
-where the code paths exist and are written from documented behaviour but have
-not been run.
+Then, for the tracer and what came with it: the step-through on the `two_sum`
+that returns its indices backwards - scrubbing to step 10 of 13 shows `seen =
+{2: 0}` and `want = 2` with line 5 marked in the editor, which is the bug,
+before any explanation is read; the trace surviving a run with no crash at all;
+tracing switching off at the cap, with a 400,000-iteration loop measured against
+the same loop untraced; the problem statement and expected output persisting
+across a restart; the model picker listing four installed models and defaulting
+to the 7.6B rather than the 1.5B coder; both models answering the same
+wrong-answer prompt, timed, with and without the trace; and the packaged build -
+Monaco loading from inside `app.asar` with Python highlighting intact, and the
+harness running from `resources/python/` where `extraResources` puts it.
+
+Not exercised: a first-time download of a model that is not already on disk; the
+packaged app's **Run** button specifically (the harness was invoked directly from
+its packaged location instead, because `STUDIO_SHOT` is deliberately refused
+when `app.isPackaged`); voice end to end, which needs a microphone and a person;
+and macOS and Linux, where the code paths exist and are written from documented
+behaviour but have not been run.
 
 ## Not done yet
 
@@ -283,14 +391,17 @@ The plan, and the notes needed to pick it up cold, are in **[NEXT.md](NEXT.md)**
 
 ### Known gaps
 
-- **Values only at a crash.** A run that finishes but prints the wrong answer
-  gets no recorded variables, because nothing raised. Capturing those needs
-  tracing rather than an exception handler, which is the same machinery a
-  step-through visualiser would want.
-- **No stepping.** No breakpoints, and no way to inspect state at a line that
-  did not fail.
+- **No breakpoints.** Stepping is a replay of a finished run, not a debugger:
+  you cannot stop it, change a value, or continue.
+- **The first 300 steps, not the last.** Recording stops at the cap rather than
+  keeping a rolling window, so a bug in the 10,000th iteration is past the end
+  of the trace. A ring buffer would keep the interesting end, at the cost of
+  tracing the whole run.
+- **Stepping does not follow edits.** The trace is of the last run, so after
+  editing, a step marks whatever is now on that line number.
 - **One file.** No open, no save-as, no tabs.
 - **One test case.** *Expected output* holds a single expected string, not a
   table of cases.
-- **The thread is not saved.** Questions and answers are lost when the window
-  closes; only the code and the expected output survive a restart.
+- **No app icon.** Packaged builds use the default Electron icon.
+- **`values` only at a crash.** The dedicated variables panel still needs an
+  exception; for a clean run the same information is in the step-through.
