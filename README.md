@@ -277,7 +277,7 @@ Two details of real tracebacks are easy to get wrong, and both are covered:
 ## Security
 
 ```
-npm test     # traceback parsing, and XSS payloads against the answer renderer
+npm test     # eslint, traceback parsing, harness/tracer, XSS payloads, AI prompts/models
 npm audit
 ```
 
@@ -324,6 +324,7 @@ renderer/
   setup.js           what this machine has; starting Ollama; downloading a model
   voice.js           push to talk, waveform, explicit states
 servers/             voice_server.py (optional speech)
+build/               make-icon.py and icon.png for packaging
 test/                traceback cases and harness runs against real Python;
                      XSS payloads against the answer renderer; model choice and
                      the shape of the prompts
@@ -340,10 +341,11 @@ npm run dist         # an installer for the current platform
 
 Two things about the build are load-bearing:
 
-`python/harness.py` ships as an **extraResource**, not inside the asar. A
-spawned Python process reads through the real filesystem, not Electron's patched
-`fs`, so a harness inside `app.asar` cannot be opened at all. `main.js` looks
-beside the archive when `app.isPackaged`, and inside `__dirname` when it is not.
+`python/harness.py` and `servers/` ship as **extraResources**, not inside the
+asar. A spawned Python process reads through the real filesystem, not Electron's
+patched `fs`, so Python code inside `app.asar` cannot be executed by an external
+interpreter. `main.js` looks beside the archive when `app.isPackaged`, and inside
+`__dirname` when it is not.
 
 Monaco is trimmed by exclusion. electron-builder ships every production
 dependency whether or not `files` names it, and `monaco-editor` carries four
@@ -424,15 +426,10 @@ The plan, and the notes needed to pick it up cold, are in **[NEXT.md](NEXT.md)**
 
 - **No breakpoints.** Stepping is a replay of a finished run, not a debugger:
   you cannot stop it, change a value, or continue.
-- **The first 300 steps, not the last.** Recording stops at the cap rather than
-  keeping a rolling window, so a bug in the 10,000th iteration is past the end
-  of the trace. A ring buffer would keep the interesting end, at the cost of
-  tracing the whole run.
-- **Stepping does not follow edits.** The trace is of the last run, so after
-  editing, a step marks whatever is now on that line number.
 - **One file.** No open, no save-as, no tabs.
 - **One test case.** *Expected output* holds a single expected string, not a
   table of cases.
-- **No app icon.** Packaged builds use the default Electron icon.
 - **`values` only at a crash.** The dedicated variables panel still needs an
   exception; for a clean run the same information is in the step-through.
+- **A trace is replaced on the next run.** The step-through recording reflects
+  only the most recent run; earlier runs are not archived for comparison.

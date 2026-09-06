@@ -8,7 +8,7 @@ by design.
 
 Run it with:
 
-    python myide-voice/voice_server.py
+    python servers/voice_server.py
 
 Endpoints (all JSON, so the workbench can reach them through IRequestService):
 
