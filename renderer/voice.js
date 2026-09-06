@@ -1,18 +1,23 @@
 /*---------------------------------------------------------------------------------------------
- *  myIDE - push to talk, with visible state.
+ *  myIDE - talking to it, with visible state at every step.
  *
- *  The old build's voice mode looked broken because nothing on screen changed
- *  while the microphone was open: you held the key, saw nothing, released, and
- *  some seconds later an answer appeared. There was no way to tell recording
- *  from a hang.
+ *  Voice looked broken for one reason above all: the steps that take time gave
+ *  no sign of being alive. The speech server loads its Whisper weights on first
+ *  use and downloads them if they are missing - several hundred megabytes - so
+ *  the first question of a session sat on "Transcribing..." for minutes with
+ *  nothing moving and no way to tell working from hung. Then, if the server was
+ *  not running at all, the error was written into an overlay that had already
+ *  been hidden, so it was never read.
  *
- *  Two fixes, both purely presentational and both essential:
- *    1. A live waveform driven by an AnalyserNode, so you can see your own
- *       voice landing. Silence looks like silence; speech looks like speech.
- *    2. Explicit states - listening, transcribing, thinking, speaking - so the
- *       gap between releasing the key and hearing an answer is accounted for.
+ *  So every wait here reports: elapsed seconds, what is being waited for, and
+ *  whether the model is still loading (asked of /health, which answers during a
+ *  transcription because the server is threaded). Nothing is silent, and no
+ *  request is without a deadline.
  *
- *  Talks to the same voice_server.py as the fork: /health, /stt, /tts on :8756.
+ *  Recording is a toggle rather than a hold. A held key cannot survive the
+ *  question being long, and there is no reason a sentence should have to.
+ *
+ *  Talks to servers/voice_server.py: /health, /stt, /tts on :8756.
  *  Licensed under the MIT License.
  *--------------------------------------------------------------------------------------------*/
 
@@ -22,6 +27,12 @@ export const VOICE_ENDPOINT = 'http://127.0.0.1:8756';
 
 /** Bars in the waveform. Enough to read as a voice, few enough to stay cheap. */
 const BAR_COUNT = 48;
+
+/** A held request must fail rather than hang, but the first transcription of a
+ *  session can legitimately take minutes while the model downloads. */
+const HEALTH_TIMEOUT_MS = 2000;
+const STT_TIMEOUT_MS = 10 * 60 * 1000;
+const TTS_TIMEOUT_MS = 60 * 1000;
 
 export class Voice {
 	/**
@@ -48,14 +59,28 @@ export class Voice {
 		this.onState(state, detail);
 	}
 
-	async available() {
+	/**
+	 * What the speech server says about itself, or undefined when it is not
+	 * there. `loaded` tells recording from downloading, which is the difference
+	 * between a wait worth explaining and one worth worrying about.
+	 */
+	async health() {
 		try {
-			const res = await fetch(`${VOICE_ENDPOINT}/health`, { signal: AbortSignal.timeout(2000) });
+			const res = await fetch(`${VOICE_ENDPOINT}/health`, {
+				signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+			});
+			if (!res.ok) {
+				return undefined;
+			}
 			const json = await res.json();
-			return Boolean(json.ready);
+			return json?.ready ? json : undefined;
 		} catch {
-			return false;
+			return undefined;
 		}
+	}
+
+	async available() {
+		return Boolean(await this.health());
 	}
 
 	/** Opens the microphone and starts drawing. Held open until stop(). */
@@ -93,6 +118,13 @@ export class Voice {
 
 	/**
 	 * Closes the microphone and transcribes.
+	 *
+	 * The wait is narrated. On a cold server the first call loads - and possibly
+	 * downloads - the Whisper model, which takes minutes, and a spinner that
+	 * cannot say so is indistinguishable from a crash. /health is polled
+	 * alongside, because the server is threaded and will answer it while it is
+	 * still working on the audio.
+	 *
 	 * @returns {Promise<string>} the recognised text, or '' if nothing was said.
 	 */
 	async stop() {
@@ -107,33 +139,66 @@ export class Voice {
 		const blob = await recorded;
 
 		this.teardown();
-		this.setState('transcribing');
 
-		// Too short to be speech - almost always a mis-tap of the key.
+		// Too short to be speech - almost always a mis-click.
 		if (blob.size < 2000) {
 			this.setState('idle');
 			return '';
 		}
 
+		this.setState('transcribing', 'Transcribing…');
 		const base64 = await blobToBase64(blob);
+		const started = Date.now();
+
+		// Count up, and say what the delay is, for as long as the request runs.
+		let loadingReported = false;
+		const ticker = setInterval(async () => {
+			const seconds = Math.round((Date.now() - started) / 1000);
+			if (!loadingReported && seconds >= 4) {
+				const info = await this.health();
+				if (info && info.loaded && info.loaded.stt === false) {
+					loadingReported = true;
+				}
+			}
+			this.setState('transcribing', loadingReported
+				? `Loading the speech model… ${seconds}s (first use downloads it)`
+				: `Transcribing… ${seconds}s`);
+		}, 1000);
+
 		try {
 			const res = await fetch(`${VOICE_ENDPOINT}/stt`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ audio: base64, format: 'webm' }),
+				signal: AbortSignal.timeout(STT_TIMEOUT_MS),
 			});
+
 			if (!res.ok) {
-				throw new Error(`speech server returned ${res.status}`);
+				const body = await res.text().catch(() => '');
+				let detail = body.slice(0, 200);
+				try {
+					detail = JSON.parse(body).error ?? detail;
+				} catch {
+					/* not JSON; the raw body is the best we have */
+				}
+				throw new Error(`The speech server failed to transcribe: ${detail}`);
 			}
+
 			const json = await res.json();
-			this.setState('idle');
 			return (json.text ?? '').trim();
 		} catch (err) {
-			this.setState('idle');
+			if (err.name === 'TimeoutError') {
+				throw new Error('The speech server did not answer. It may still be downloading its model.');
+			}
+			// A refused connection is the common one, and it has a fix worth naming.
+			if (err instanceof TypeError) {
+				throw new Error('The speech server is not running.');
+			}
 			throw err;
+		} finally {
+			clearInterval(ticker);
 		}
 	}
-
 	/** Speaks a line back. Failure here is never fatal - the text is on screen. */
 	async speak(text) {
 		if (!text || !text.trim()) {
@@ -145,7 +210,11 @@ export class Voice {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ text: text.slice(0, 600) }),
+				signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
 			});
+			if (!res.ok) {
+				throw new Error(`tts returned ${res.status}`);
+			}
 			const json = await res.json();
 			const audio = new Audio(`data:audio/wav;base64,${json.audio}`);
 			await audio.play();
