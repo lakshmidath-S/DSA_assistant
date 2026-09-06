@@ -26,11 +26,29 @@ const STATE_FILE = path.join(STATE_DIR, 'last.json');
 /** The file Python actually runs. Kept on disk so tracebacks have a real path. */
 const SCRATCH_FILE = path.join(STATE_DIR, 'main.py');
 
-/** Runs the file and records the variables at a failure. See python/harness.py. */
-const HARNESS = path.join(__dirname, 'python', 'harness.py');
+/**
+ * Runs the file, records the variables at a failure, and traces the path it
+ * took. See python/harness.py.
+ *
+ * Packaged, this cannot live beside the code: __dirname is then inside
+ * app.asar, and the archive is readable through Electron's patched fs but not
+ * by a Python process spawned from outside it. So it ships as an extra resource
+ * and is found next to the asar rather than in it.
+ */
+const HARNESS = app.isPackaged
+	? path.join(process.resourcesPath, 'python', 'harness.py')
+	: path.join(__dirname, 'python', 'harness.py');
 
-/** Prefix of the stderr line the harness uses to report captured values. */
+/**
+ * Prefixes of the stderr lines the harness reports through. These are for the
+ * editor, not the reader: every one of them is stripped before the output panel
+ * sees the text, and before it is parsed as a traceback.
+ */
 const VALUES_MARKER = '__MYIDE_VALUES__';
+const TRACE_MARKER = '__MYIDE_TRACE__';
+const MARKERS = [VALUES_MARKER, TRACE_MARKER];
+
+const isMarker = line => MARKERS.some(m => line.startsWith(m));
 
 /** Named so no template in this file has to carry an escape inline. */
 const NEWLINE = String.fromCharCode(10);
@@ -258,32 +276,41 @@ async function resolvePython() {
 
 
 /**
- * Pulls the harness's values line out of stderr, and returns what should
+ * Pulls the harness's marker lines out of stderr, and returns what should
  * actually be shown.
  *
- * The line has to be removed rather than left in place: the editor parses this
+ * They have to be removed rather than left in place: the editor parses this
  * text as a traceback, and the output panel shows it verbatim.
  */
-function extractValues(stderr) {
-	if (!stderr.includes(VALUES_MARKER)) {
-		return { values: undefined, text: stderr };
+function extractMarkers(stderr) {
+	if (!MARKERS.some(m => stderr.includes(m))) {
+		return { values: undefined, trace: undefined, text: stderr };
 	}
 
 	let values;
+	let trace;
 	const kept = [];
 	for (const line of stderr.split(NEWLINE)) {
-		if (!line.startsWith(VALUES_MARKER)) {
+		if (!isMarker(line)) {
 			kept.push(line);
 			continue;
 		}
+		const [marker, target] = line.startsWith(VALUES_MARKER)
+			? [VALUES_MARKER, 'values']
+			: [TRACE_MARKER, 'trace'];
 		try {
-			values = JSON.parse(line.slice(VALUES_MARKER.length));
+			const parsed = JSON.parse(line.slice(marker.length));
+			if (target === 'values') {
+				values = parsed;
+			} else {
+				trace = parsed;
+			}
 		} catch {
-			// A truncated line is not worth failing the run over.
+			// A line truncated by the output cap is not worth failing the run over.
 		}
 	}
 
-	return { values, text: kept.join(NEWLINE) };
+	return { values, trace, text: kept.join(NEWLINE) };
 }
 
 ipcMain.handle('run:start', async (_event, code) => {
@@ -331,9 +358,9 @@ ipcMain.handle('run:start', async (_event, code) => {
 			killCurrent();
 		}, RUN_TIMEOUT_MS);
 
-		// stderr is streamed a line at a time so the harness's values marker can
-		// be held back: it is for the model, not the reader, and a partial chunk
-		// must not leak half of it into the panel.
+		// stderr is streamed a line at a time so the harness's marker lines can
+		// be held back: they are for the model, not the reader, and a partial
+		// chunk must not leak half of one into the panel.
 		let errTail = '';
 		const push = (bucket, chunk) => {
 			const text = chunk.toString('utf8');
@@ -351,7 +378,7 @@ ipcMain.handle('run:start', async (_event, code) => {
 			errTail += text;
 			const parts = errTail.split(NEWLINE);
 			errTail = parts.pop() ?? '';
-			const shown = parts.filter(l => !l.startsWith(VALUES_MARKER));
+			const shown = parts.filter(l => !isMarker(l));
 			if (shown.length) {
 				win?.webContents.send('run:data', { bucket, text: shown.join(NEWLINE) + NEWLINE });
 			}
@@ -377,12 +404,14 @@ ipcMain.handle('run:start', async (_event, code) => {
 			clearTimeout(timer);
 			current = null;
 
-			// What the variables actually held when it failed. Absent for a clean
-			// run, and for a SyntaxError, where nothing ever executed.
-			const { values, text: cleanStderr } = extractValues(stderr);
+			// What the variables actually held when it failed, and the path the
+			// run took. Values are absent for a clean run and for a SyntaxError;
+			// a trace is absent only for a SyntaxError, where nothing executed.
+			const { values, trace, text: cleanStderr } = extractMarkers(stderr);
 
 			resolve({
 				values,
+				trace,
 				ok: exitCode === 0 && !timedOut,
 				stdout,
 				stderr: timedOut
