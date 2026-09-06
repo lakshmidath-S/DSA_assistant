@@ -32,7 +32,10 @@
 				<path d="M8 11.5V14" fill="none" stroke="currentColor" stroke-width="1.2" />
 			</svg>
 		</button>
-		<span id="model" class="model" title="Model"></span>
+		<!-- A picker, not a label: which model answers is the one setting worth
+		     changing while working. A 1.5B that replies in three seconds and a
+		     7B that takes twenty are useful at different moments. -->
+		<select id="model" class="model" title="Model"></select>
 	</header>
 
 	<main>
@@ -109,6 +112,27 @@
 				<pre id="ok-out" class="err-line" hidden></pre>
 			</section>
 
+				<!-- The run went somewhere whether or not it crashed. Dragging the
+				     scrubber walks the line marker back through the editor. -->
+				<section id="trace-card" class="card trace" hidden>
+					<button id="trace-toggle" class="card-head trace-head" aria-expanded="false">
+						<span class="chev">&#9656;</span>
+						<span class="err-type trace">Step through</span>
+						<span id="trace-count" class="meta"></span>
+					</button>
+					<div id="trace-body" hidden>
+						<div class="trace-controls">
+							<button id="trace-prev" class="ghost small" title="Previous step (Alt+Left)">&#8249;</button>
+							<input id="trace-scrub" class="trace-scrub" type="range" min="0" max="0" value="0"
+								aria-label="Step">
+							<button id="trace-next" class="ghost small" title="Next step (Alt+Right)">&#8250;</button>
+						</div>
+						<p id="trace-where" class="trace-where"></p>
+						<table id="trace-vars" class="values-rows"></table>
+						<p id="trace-note" class="step-note" hidden></p>
+					</div>
+				</section>
+
 				<div id="thread" class="thread"></div>
 			</div>
 
@@ -130,6 +154,17 @@
 					<button id="ask-optimise" class="ghost small">Can it be faster?</button>
 					<button id="thread-clear" class="link">clear</button>
 				</div>
+			</section>
+
+			<!-- What the code is meant to do, and what it is meant to print. The
+			     model has seen neither; without them it infers intent from the
+			     code, which is the thing that is wrong. -->
+			<section class="expect">
+				<button id="problem-toggle" class="expect-head" aria-expanded="false">
+					<span class="chev">&#9656;</span> The problem <span class="opt">optional</span>
+				</button>
+				<textarea id="problem" class="expect-box" hidden rows="4"
+					placeholder="Paste the question you are solving.&#10;Without it, an explanation can only guess at what the code was meant to do."></textarea>
 			</section>
 
 			<section class="expect">

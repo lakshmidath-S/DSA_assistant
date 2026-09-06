@@ -146,13 +146,42 @@ button svg {
 	font-variant-numeric: tabular-nums;
 }
 
+/*
+ * A select, but it should read as the label it replaced: no chrome until you
+ * are on it. It sits in the title bar, where a real dropdown would be the
+ * loudest thing on the screen and the least often used.
+ */
 .model {
 	color: var(--text-faint);
 	font-size: 11.5px;
+	font-family: inherit;
 	max-width: 220px;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+	appearance: none;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	padding: 3px 6px;
+	cursor: pointer;
+}
+
+.model:hover:not(:disabled),
+.model:focus-visible {
+	color: var(--text-dim);
+	border-color: var(--line);
+	background: var(--bg-inset);
+}
+
+.model:disabled {
+	cursor: default;
+}
+
+/* The popup is drawn by the OS, which does not inherit the page's colours. */
+.model option {
+	background: var(--bg-raised);
+	color: var(--text);
 }
 
 /* --- layout -------------------------------------------------------------- */
@@ -921,4 +950,115 @@ kbd {
 .values-rows .vval {
 	color: var(--text-dim);
 	word-break: break-all;
+}
+
+/* --- stepping through the run -------------------------------------------- */
+
+/*
+ * The trace card is a peer of the error and wrong-answer cards, but it is not
+ * itself a failure - so it is tinted with the accent rather than the red, and
+ * it starts collapsed. A step-through is something you reach for, not something
+ * that should push the explanation off the screen on every run.
+ */
+.card.trace {
+	border-left-color: var(--accent);
+}
+
+.err-type.trace {
+	color: var(--accent);
+}
+
+.trace-head {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	width: 100%;
+	padding: 0;
+	background: none;
+	border: 0;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.trace-head .chev {
+	color: var(--text-faint);
+	font-size: 10px;
+	transition: transform 0.12s ease;
+}
+
+.trace-head[aria-expanded='true'] .chev {
+	transform: rotate(90deg);
+}
+
+.trace-head .meta {
+	margin-left: auto;
+}
+
+.trace-controls {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 8px 0 6px;
+}
+
+.trace-controls button {
+	padding: 1px 9px;
+	font-size: 14px;
+	line-height: 1.4;
+}
+
+/*
+ * The scrubber. A range input rather than a list of steps: the point is to drag
+ * it and watch the list fill up in the panel while the marker walks down the
+ * editor, which a list of three hundred rows does not give you.
+ */
+.trace-scrub {
+	flex: 1;
+	min-width: 0;
+	height: 4px;
+	appearance: none;
+	background: var(--line);
+	border-radius: 2px;
+	outline-offset: 3px;
+}
+
+.trace-scrub::-webkit-slider-thumb {
+	appearance: none;
+	width: 13px;
+	height: 13px;
+	border-radius: 50%;
+	background: var(--accent);
+	cursor: pointer;
+	border: 0;
+}
+
+.trace-where {
+	margin: 0 0 7px;
+	color: var(--text-dim);
+	font-size: 11.5px;
+}
+
+/* The names that changed on this step, which is what a scrubber is watched for. */
+.values-rows tr.changed .vname {
+	color: var(--accent);
+}
+
+.values-rows tr.changed .vval {
+	color: var(--text);
+}
+
+/* The step marker in the editor: the same idea as the error row, in the accent
+   colour, and deliberately quieter - it marks a line that is about to run
+   rather than one that went wrong. */
+.trace-row {
+	background: linear-gradient(90deg, rgba(74, 168, 255, 0.16), transparent 65%);
+}
+
+.trace-glyph {
+	background: var(--accent);
+	width: 3px !important;
+	margin-left: 5px;
+	border-radius: 2px;
 }

@@ -42,10 +42,17 @@ const els = {
 	threadClear: $('thread-clear'), selChip: $('sel-chip'), selText: $('sel-text'),
 	selClear: $('sel-clear'),
 	values: $('values'), valuesRows: $('values-rows'),
+	problem: $('problem'), problemToggle: $('problem-toggle'),
+	traceCard: $('trace-card'), traceToggle: $('trace-toggle'), traceBody: $('trace-body'),
+	traceCount: $('trace-count'), traceScrub: $('trace-scrub'), tracePrev: $('trace-prev'),
+	traceNext: $('trace-next'), traceWhere: $('trace-where'), traceVars: $('trace-vars'),
+	traceNote: $('trace-note'),
 };
 
 let editor;
 let decorations;
+/** Kept apart from the error marker: the two are shown at the same time. */
+let traceDecorations;
 let scratchPath = '';
 let lastRun;
 let aiAbort;
@@ -101,13 +108,17 @@ window.monacoLoaded.then(async () => {
 	});
 
 	decorations = editor.createDecorationsCollection();
+	traceDecorations = editor.createDecorationsCollection();
 	editor.setPosition({ lineNumber: session.line ?? 1, column: session.column ?? 1 });
 	editor.focus();
 
-	// Editing invalidates the marker: it is about code that no longer exists.
+	// Editing invalidates both marks: they are about code that no longer exists.
 	editor.onDidChangeModelContent(() => {
 		if (decorations.length) {
 			decorations.clear();
+		}
+		if (traceDecorations.length) {
+			traceDecorations.clear();
 		}
 		updateEmptyState();
 		scheduleSave();
@@ -118,7 +129,9 @@ window.monacoLoaded.then(async () => {
 	editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, run);
 
 	watchSelections();
-	restoreExpected();
+	rememberBox(els.problem, els.problemToggle, 'problem');
+	rememberBox(els.expect, els.expectToggle, 'expected');
+	restoreThread();
 	await refreshSetup();
 });
 
@@ -206,10 +219,12 @@ async function run() {
 	}
 	aiAbort?.abort();
 	decorations.clear();
+	traceDecorations.clear();
 	els.out.textContent = '';
 	els.card.hidden = true;
 	els.okCard.hidden = true;
 	els.diffCard.hidden = true;
+	els.traceCard.hidden = true;
 	els.explain.innerHTML = '';
 	els.diffExplain.innerHTML = '';
 	els.aiMeta.textContent = '';
@@ -240,6 +255,11 @@ async function run() {
 	}
 
 	paintOutput(result);
+
+	// Before the cards, and regardless of which one is about to be shown: the
+	// path it took is worth having whether it crashed, printed the wrong thing,
+	// or looked fine.
+	showTrace(result.trace);
 
 	const parsed = parseTraceback(result.stderr, scratchPath || result.file);
 	if (parsed) {
@@ -427,6 +447,9 @@ async function explain(question, target = 'error', reveal = false) {
 						parsed: lastRun.parsed,
 						stdout: lastRun.stdout,
 						expected: lastRun.expected,
+						values: lastRun.values,
+						trace: lastRun.trace,
+						problem: els.problem.value,
 						question,
 					}),
 				},
@@ -621,8 +644,13 @@ async function refreshSetup() {
 
 	if (setupState.provider && setupState.models.length) {
 		ai.provider = setupState.provider;
-		ai.model = pickDefaultModel(setupState.models);
-		els.model.textContent = `${PROVIDERS[ai.provider].label} · ${ai.model}`;
+		// A remembered choice beats the default, but only while it is still
+		// installed - a model can be deleted between sessions.
+		const remembered = readSetting('model');
+		ai.model = setupState.models.includes(remembered)
+			? remembered
+			: pickDefaultModel(setupState.models, setupState.sizes);
+		paintModels(setupState.models);
 		els.ask.disabled = false;
 		els.diffAsk.disabled = false;
 		els.reveal.disabled = false;
@@ -630,7 +658,7 @@ async function refreshSetup() {
 		setAskEnabled(true);
 	} else {
 		ai.provider = undefined;
-		els.model.textContent = 'no model yet';
+		paintModels([]);
 		els.ask.disabled = true;
 		els.diffAsk.disabled = true;
 		els.reveal.disabled = true;
@@ -641,6 +669,53 @@ async function refreshSetup() {
 	renderSetup(setupState);
 	els.setup.hidden = isReady(setupState);
 }
+
+function readSetting(key) {
+	try {
+		return localStorage.getItem(key) ?? '';
+	} catch {
+		return '';
+	}
+}
+
+/**
+ * Fills the model picker.
+ *
+ * Which model answers is worth changing without leaving the window: the same
+ * question costs three seconds on a 1.5B and twenty on a 7B, and which of those
+ * is the right trade changes with how stuck you are.
+ */
+function paintModels(models) {
+	els.model.textContent = '';
+
+	if (!models.length) {
+		const none = document.createElement('option');
+		none.textContent = 'no model yet';
+		els.model.appendChild(none);
+		els.model.disabled = true;
+		return;
+	}
+
+	for (const name of models) {
+		const option = document.createElement('option');
+		option.value = name;
+		option.textContent = name;
+		els.model.appendChild(option);
+	}
+	els.model.disabled = false;
+	els.model.value = ai.model;
+	els.model.title = `${PROVIDERS[ai.provider].label} · ${ai.model}`;
+}
+
+els.model.addEventListener('change', () => {
+	ai.model = els.model.value;
+	els.model.title = `${PROVIDERS[ai.provider].label} · ${ai.model}`;
+	try {
+		localStorage.setItem('model', ai.model);
+	} catch {
+		/* the choice just will not survive a restart */
+	}
+});
 
 /** One row of the checklist. */
 function step(done, title, note, actions = []) {
@@ -798,37 +873,43 @@ function normalise(text) {
 		.trim();
 }
 
-function restoreExpected() {
+/**
+ * A collapsible box that remembers what was typed in it.
+ *
+ * There are two: the problem being solved, and the output it should produce.
+ * Both are things you paste once and then run against twenty times, so losing
+ * either on restart would make them not worth filling in. Both start open when
+ * there is something in them, because a box you cannot see is a box you forget
+ * is set - and a stale expected output turns every correct run red.
+ */
+function rememberBox(box, toggle, key) {
+	const setOpen = open => {
+		box.hidden = !open;
+		toggle.setAttribute('aria-expanded', String(open));
+	};
+
 	try {
-		const saved = localStorage.getItem('expected') ?? '';
-		els.expect.value = saved;
-		if (saved) {
-			setExpectedOpen(true);
-		}
+		box.value = localStorage.getItem(key) ?? '';
 	} catch {
 		/* storage disabled; the box simply starts empty */
 	}
+	setOpen(Boolean(box.value));
+
+	toggle.addEventListener('click', () => {
+		setOpen(box.hidden);
+		if (!box.hidden) {
+			box.focus();
+		}
+	});
+
+	box.addEventListener('input', () => {
+		try {
+			localStorage.setItem(key, box.value);
+		} catch {
+			/* not worth failing a keystroke over */
+		}
+	});
 }
-
-function setExpectedOpen(open) {
-	els.expect.hidden = !open;
-	els.expectToggle.setAttribute('aria-expanded', String(open));
-}
-
-els.expectToggle.addEventListener('click', () => {
-	setExpectedOpen(els.expect.hidden);
-	if (!els.expect.hidden) {
-		els.expect.focus();
-	}
-});
-
-els.expect.addEventListener('input', () => {
-	try {
-		localStorage.setItem('expected', els.expect.value);
-	} catch {
-		/* not worth failing a keystroke over */
-	}
-});
 
 function showDiff(expected, got) {
 	els.diffCard.hidden = false;
@@ -893,6 +974,54 @@ function watchSelections() {
 			setSelection(sel.toString());
 		}
 	});
+}
+
+/*
+ * The thread survives a restart.
+ *
+ * Losing it on close was the thing that made the panel feel disposable: you
+ * work out why the loop is wrong on Monday, close the window, and on Tuesday
+ * the reasoning is gone while the code that prompted it is still there. Only
+ * the text is kept - the answers are re-rendered through the same escaping
+ * markdown path they arrived through, never stored as HTML.
+ */
+const THREAD_KEY = 'thread';
+const THREAD_MAX = 20;
+
+/** The turns as data, so they can be written out without reading the DOM back. */
+const turns = [];
+
+function saveThread() {
+	try {
+		localStorage.setItem(THREAD_KEY, JSON.stringify(turns.slice(-THREAD_MAX)));
+	} catch {
+		/* a long thread in a full store; the questions still work */
+	}
+}
+
+function restoreThread() {
+	let saved = [];
+	try {
+		saved = JSON.parse(localStorage.getItem(THREAD_KEY) ?? '[]');
+	} catch {
+		return;
+	}
+	if (!Array.isArray(saved)) {
+		return;
+	}
+
+	for (const turn of saved.slice(-THREAD_MAX)) {
+		if (typeof turn?.q !== 'string' || typeof turn?.a !== 'string') {
+			continue;
+		}
+		turns.push(turn);
+		const { answer, meta } = addTurn(turn.q, turn.scope);
+		answer.innerHTML = render(turn.a);
+		meta.textContent = turn.meta ?? '';
+		// So a bare "why?" after a restart still has a subject.
+		history.push({ role: 'user', content: turn.q }, { role: 'assistant', content: turn.a });
+	}
+	history.splice(0, Math.max(0, history.length - HISTORY_TURNS * 2));
 }
 
 /** One question and its answer, appended to the stack. */
@@ -971,6 +1100,8 @@ async function ask(question, mode = 'ask') {
 						expected: lastRun?.expected,
 						stdout: lastRun?.stdout,
 						values: lastRun?.values,
+						trace: lastRun?.trace,
+						problem: els.problem.value,
 					}),
 				},
 			],
@@ -984,6 +1115,8 @@ async function ask(question, mode = 'ask') {
 		meta.textContent = `${ai.model} · ${((Date.now() - started) / 1000).toFixed(1)}s`;
 
 		history.push({ role: 'user', content: question }, { role: 'assistant', content: clean });
+		turns.push({ q: question, scope, a: clean, meta: meta.textContent });
+		saveThread();
 	} catch (err) {
 		if (err.name === 'AbortError') {
 			answer.innerHTML = '<p>Cancelled.</p>';
@@ -1023,6 +1156,8 @@ els.askOptimise.addEventListener('click', () => ask(
 els.threadClear.addEventListener('click', () => {
 	els.thread.textContent = '';
 	history.length = 0;
+	turns.length = 0;
+	saveThread();
 });
 
 /**
@@ -1037,14 +1172,199 @@ function showValues(values) {
 	els.values.hidden = entries.length === 0;
 
 	for (const [name, repr] of entries) {
-		const tr = document.createElement('tr');
-		const n = document.createElement('td');
-		n.className = 'vname';
-		n.textContent = name;
-		const v = document.createElement('td');
-		v.className = 'vval';
-		v.textContent = repr;
-		tr.append(n, v);
-		els.valuesRows.appendChild(tr);
+		els.valuesRows.appendChild(valueRow(name, repr));
 	}
 }
+
+/** One name-and-value row, shared by the crash panel and the step-through. */
+function valueRow(name, repr, changed = false) {
+	const tr = document.createElement('tr');
+	if (changed) {
+		tr.className = 'changed';
+	}
+	const n = document.createElement('td');
+	n.className = 'vname';
+	n.textContent = name;
+	const v = document.createElement('td');
+	v.className = 'vval';
+	v.textContent = repr;
+	tr.append(n, v);
+	return tr;
+}
+
+// --- stepping through the run ---------------------------------------------------
+// The traceback says where it stopped. This says how it got there - and for a
+// run that printed the wrong answer without crashing, it is the only account of
+// what happened at all.
+
+/** The steps of the last run, and where the scrubber is in them. */
+let traceSteps = [];
+let traceAt = 0;
+
+function showTrace(trace) {
+	traceSteps = trace?.steps ?? [];
+	traceAt = 0;
+	traceDecorations.clear();
+
+	els.traceCard.hidden = traceSteps.length === 0;
+	if (!traceSteps.length) {
+		return;
+	}
+
+	els.traceCount.textContent = trace.truncated
+		? `first ${traceSteps.length} steps`
+		: `${traceSteps.length} step${traceSteps.length === 1 ? '' : 's'}`;
+
+	// Truncation is not a detail: the recording stops but the program does not,
+	// so the last step shown is not where the run ended.
+	els.traceNote.hidden = !trace.truncated;
+	els.traceNote.textContent = trace.truncated
+		? `Recording stopped after ${trace.limit} steps to keep the run fast. The program carried on past the last step here.`
+		: '';
+
+	els.traceScrub.max = String(traceSteps.length - 1);
+	els.traceScrub.value = '0';
+	// Without reveal: this runs on every Run, and scrolling the editor to the
+	// first traced line each time would fight whoever is reading line 40.
+	setStep(0, false);
+}
+
+/**
+ * Everything in scope at a step, rebuilt by replaying the changes up to it.
+ *
+ * The harness records only what changed on each line, which is what keeps three
+ * hundred steps small enough to hold and to send. Replaying forward turns that
+ * back into "here is what is in scope now". It has to be done per frame, keyed
+ * by name and depth: a recursive call would otherwise show its parent's values,
+ * and a second call to the same function would inherit the first one's.
+ */
+function stateAt(index) {
+	const frames = new Map();
+
+	for (let i = 0; i <= index; i++) {
+		const step = traceSteps[i];
+		const key = `${step.fn}#${step.d}`;
+
+		let vars = frames.get(key);
+		if (!vars) {
+			vars = new Map();
+			frames.set(key, vars);
+		}
+		for (const [name, value] of Object.entries(step.vars ?? {})) {
+			vars.set(name, value);
+		}
+		// The frame closed. Its names are gone, unless this is the step being
+		// shown - in which case they are what the reader asked to look at.
+		if (step.r && i < index) {
+			frames.delete(key);
+		}
+	}
+
+	const at = traceSteps[index];
+	return frames.get(`${at.fn}#${at.d}`) ?? new Map();
+}
+
+function setStep(index, reveal = true) {
+	if (!traceSteps.length) {
+		return;
+	}
+	traceAt = Math.min(traceSteps.length - 1, Math.max(0, index));
+	const step = traceSteps[traceAt];
+	els.traceScrub.value = String(traceAt);
+	els.tracePrev.disabled = traceAt === 0;
+	els.traceNext.disabled = traceAt === traceSteps.length - 1;
+
+	const where = step.fn === '<module>' ? 'the file itself' : `${step.fn}()`;
+	if (step.ret !== undefined) {
+		els.traceWhere.textContent = `${traceAt + 1}/${traceSteps.length} · line ${step.line} — ${where} returned ${step.ret}`;
+	} else if (step.r) {
+		els.traceWhere.textContent = `${traceAt + 1}/${traceSteps.length} · line ${step.line} — ${where} ended`;
+	} else if (step.exc) {
+		els.traceWhere.textContent = `${traceAt + 1}/${traceSteps.length} · line ${step.line} — raised ${step.exc}`;
+	} else {
+		// A line event fires before the line runs, so this is about to happen,
+		// not just happened. Saying so is the difference between the panel
+		// making sense and being off by one.
+		els.traceWhere.textContent = `${traceAt + 1}/${traceSteps.length} · about to run line ${step.line} in ${where}`;
+	}
+
+	els.traceVars.textContent = '';
+	const changed = new Set(Object.keys(step.vars ?? {}));
+	for (const [name, value] of stateAt(traceAt)) {
+		els.traceVars.appendChild(valueRow(name, value, changed.has(name)));
+	}
+
+	markStep(step.line, reveal);
+}
+
+/** Puts the step on the code, the way an error is put on the code. */
+function markStep(line, reveal = true) {
+	traceDecorations.clear();
+	// Nothing is marked while the section is closed: the highlight and the
+	// scroll it causes would come from a panel the reader cannot see.
+	if (!editor || els.traceBody.hidden) {
+		return;
+	}
+	// The buffer may have been edited since the run, and Monaco throws on a
+	// line it does not have - which would leave the panel half drawn.
+	const lineCount = editor.getModel().getLineCount();
+	if (!(line >= 1 && line <= lineCount)) {
+		return;
+	}
+
+	traceDecorations.set([{
+		range: new monaco.Range(line, 1, line, 1),
+		options: {
+			isWholeLine: true,
+			className: 'trace-row',
+			glyphMarginClassName: 'trace-glyph',
+		},
+	}]);
+	if (reveal) {
+		editor.revealLineInCenterIfOutsideViewport(line, monaco.editor.ScrollType.Smooth);
+	}
+}
+
+els.traceScrub.addEventListener('input', () => setStep(Number(els.traceScrub.value)));
+els.tracePrev.addEventListener('click', () => setStep(traceAt - 1));
+els.traceNext.addEventListener('click', () => setStep(traceAt + 1));
+
+els.traceToggle.addEventListener('click', () => {
+	const open = els.traceBody.hidden;
+	els.traceBody.hidden = !open;
+	els.traceToggle.setAttribute('aria-expanded', String(open));
+	try {
+		localStorage.setItem('traceOpen', open ? '1' : '');
+	} catch {
+		/* the section just will not remember being open */
+	}
+	if (open) {
+		setStep(traceAt);
+	} else {
+		traceDecorations.clear();
+	}
+});
+
+try {
+	if (localStorage.getItem('traceOpen')) {
+		els.traceBody.hidden = false;
+		els.traceToggle.setAttribute('aria-expanded', 'true');
+	}
+} catch {
+	/* start collapsed */
+}
+
+// Alt+arrow steps, so a walk through a loop does not mean going back to the
+// mouse between every step. Alt, because the editor owns the bare arrows.
+window.addEventListener('keydown', e => {
+	if (!e.altKey || els.traceCard.hidden || els.traceBody.hidden) {
+		return;
+	}
+	if (e.key === 'ArrowLeft') {
+		e.preventDefault();
+		setStep(traceAt - 1);
+	} else if (e.key === 'ArrowRight') {
+		e.preventDefault();
+		setStep(traceAt + 1);
+	}
+});

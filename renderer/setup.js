@@ -61,26 +61,34 @@ export function pythonHelp(platform) {
 
 /**
  * What this machine currently has.
+ *
+ * `models` stays a list of names, because that is what the picker and the
+ * checklist show. `sizes` carries the parameter counts the server was willing
+ * to state, for choosing the default - see pickDefaultModel.
+ *
  * @returns {Promise<{python: object, platform: string, ollamaPath: string|undefined,
- *                    provider: string|undefined, models: string[]}>}
+ *                    provider: string|undefined, models: string[],
+ *                    sizes: Record<string, number>}>}
  */
 export async function probe() {
 	const base = await window.studio.probe();
 
 	for (const provider of ['lmstudio', 'ollama']) {
 		try {
-			const models = await listModels(provider);
-			if (models.length) {
-				return { ...base, provider, models };
-			}
-			// Reachable but empty: still the provider to talk to, once it has a model.
-			return { ...base, provider, models: [] };
+			const found = await listModels(provider);
+			const models = found.map(m => m.name);
+			const sizes = Object.fromEntries(
+				found.filter(m => m.params !== undefined).map(m => [m.name, m.params]),
+			);
+			// Reachable but empty is still the provider to talk to, once it has
+			// a model - so this returns either way rather than trying the next.
+			return { ...base, provider, models, sizes };
 		} catch {
 			/* not up; try the next */
 		}
 	}
 
-	return { ...base, provider: undefined, models: [] };
+	return { ...base, provider: undefined, models: [], sizes: {} };
 }
 
 /** True when the machine is ready to explain an error. */

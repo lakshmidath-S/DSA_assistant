@@ -43,31 +43,86 @@ export function stripReasoning(text) {
 		.trim();
 }
 
-/** Prefer a coder-tuned model, largest that is still sane on a small GPU. */
-export function pickDefaultModel(models) {
-	const size = id => {
+/**
+ * Below this, a model cannot hold the teaching rules.
+ *
+ * Measured, not assumed. Asked to explain the two_sum that returns its indices
+ * in discovery order, qwen2.5-coder:1.5b answered in 3.5s and again in 9.3s
+ * with the recorded trace - and both times wrote out a corrected line under a
+ * "Here's the corrected line:" heading, which is the one thing SYSTEM_PROMPT
+ * forbids, and both times blamed the wrong line. A 7.6B on the same prompt
+ * named line 6, explained the ordering assumption, and closed with a question,
+ * in 51-74s. Slow and right beats instant and confidently wrong: being handed a
+ * fix you did not ask for defeats the point of the app, and being handed the
+ * wrong one wastes the session.
+ *
+ * The 1.5B stays selectable in the picker - it is genuinely quicker, and for
+ * "what does this error mean" that can be the better trade. It is just not the
+ * default.
+ */
+const MIN_TEACHING_B = 3;
+
+/** Above this, a laptop GPU starts swapping and the wait stops being worth it. */
+const MAX_LOCAL_B = 8;
+
+/**
+ * Prefer a coder-tuned model, largest that is still sane on a small GPU - but
+ * never one so small it argues with its own instructions.
+ */
+export function pickDefaultModel(models, sizes = {}) {
+	const fromName = id => {
 		const m = /(\d+(?:\.\d+)?)\s*b\b/i.exec(id);
 		return m ? Number(m[1]) : undefined;
 	};
-	const coders = models.filter(m => /coder|code/i.test(m) && !/embed/i.test(m));
-	const sized = coders
-		.map(model => ({ model, b: size(model) }))
-		.filter(c => c.b !== undefined)
-		.sort((a, b) => b.b - a.b);
 
-	return sized.find(c => c.b <= 8)?.model ?? sized[0]?.model ?? coders[0] ?? models.find(m => !/embed/i.test(m));
+	const usable = models
+		.filter(m => !/embed/i.test(m))
+		// What the server says it is, and only then what the name suggests.
+		.map(model => ({ model, b: sizes[model] ?? fromName(model), coder: /coder|code/i.test(model) }));
+
+	// Coder-tuned first, then largest - but only among models big enough to be
+	// worth defaulting to. A 1.5B coder used to win here purely by being the
+	// only name with "coder" in it, beating a 7.6B sitting right beside it.
+	const candidates = usable
+		.filter(c => c.b !== undefined && c.b >= MIN_TEACHING_B && c.b <= MAX_LOCAL_B)
+		.sort((a, b) => Number(b.coder) - Number(a.coder) || b.b - a.b);
+
+	// Nothing in range: take a coder of any size, then anything at all. Some
+	// model is better than a dead panel, and the picker can correct it.
+	return candidates[0]?.model
+		?? usable.find(c => c.coder)?.model
+		?? usable[0]?.model;
 }
 
+/**
+ * The installed models, as `{ name, params }`.
+ *
+ * `params` is the size in billions where the server will say - Ollama reports
+ * it as "7.6B" in the tag details - and undefined otherwise. It matters because
+ * a name is not a reliable size: a model pulled under a custom tag carries no
+ * number at all, and picking a default by reading the name would rank a 7.6B
+ * called `logic:latest` below a 1.5B that spells its size out.
+ */
 export async function listModels(provider) {
+	const billions = text => {
+		const m = /(\d+(?:\.\d+)?)\s*b\b/i.exec(text ?? '');
+		return m ? Number(m[1]) : undefined;
+	};
+
 	const { endpoint } = PROVIDERS[provider];
 	if (provider === 'ollama') {
 		const res = await fetch(`${endpoint}/api/tags`);
 		const json = await res.json();
-		return (json.models ?? []).map(m => m.name);
+		return (json.models ?? []).map(m => ({
+			name: m.name,
+			params: billions(m.details?.parameter_size),
+		}));
 	}
+
+	// LM Studio's OpenAI-compatible listing carries an id and nothing else.
 	const res = await fetch(`${endpoint}/v1/models`);
 	const json = await res.json();
-	return (json.data ?? []).map(m => m.id);
+	return (json.data ?? []).map(m => ({ name: m.id, params: undefined }));
 }
 
 /*
@@ -120,11 +175,92 @@ export const SYSTEM_PROMPT_REVEAL = [
 ].join('\n');
 
 /**
- * Builds the user message. Everything here is fact: the traceback came from
- * Python, the source is what ran, the output is what it printed.
+ * The recorded path, as something a model can read.
+ *
+ * Only the tail: the end of a run is where a wrong answer is produced, and the
+ * beginning is usually setup. When the recording hit its cap the steps shown
+ * are from the middle of a longer run, and saying so matters - a model handed
+ * the last recorded step silently would treat it as the end of the program and
+ * explain a program that stopped there.
  */
-export function buildPrompt({ code, parsed, stdout, expected, values, question }) {
-	const parts = [];
+export function formatTrace(trace, limit = 24) {
+	const steps = trace?.steps ?? [];
+	if (!steps.length) {
+		return '';
+	}
+
+	const shown = steps.slice(-limit);
+	const lines = [];
+	let frame = '';
+
+	for (const step of shown) {
+		const here = `${step.fn}#${step.d}`;
+		if (here !== frame) {
+			frame = here;
+			lines.push(step.fn === '<module>' ? 'in the file itself:' : `in ${step.fn}():`);
+		}
+
+		const where = `  line ${String(step.line).padStart(3)}`;
+		if (step.ret !== undefined) {
+			lines.push(`${where}  returned ${step.ret}`);
+		} else if (step.r) {
+			lines.push(`${where}  ${step.fn === '<module>' ? 'end of the file' : 'left without returning a value'}`);
+		} else if (step.exc) {
+			lines.push(`${where}  raised ${step.exc}`);
+		} else if (step.vars) {
+			lines.push(`${where}  ${Object.entries(step.vars).map(([k, v]) => `${k} = ${v}`).join(', ')}`);
+		} else {
+			lines.push(where);
+		}
+	}
+
+	return lines.join(NL);
+}
+
+/** How the trace should be introduced, given what was left out of it. */
+function traceHeading(trace, shownCount) {
+	const total = trace.steps.length;
+	if (trace.truncated) {
+		return [
+			`THIS IS WHAT ACTUALLY HAPPENED, STEP BY STEP. Recording stopped after`,
+			`${total} steps and the program carried on past them, so these are steps`,
+			`from the MIDDLE of the run, not the end. Do not say the program ended here.`,
+		].join(NL);
+	}
+	if (shownCount < total) {
+		return `THIS IS WHAT ACTUALLY HAPPENED - the last ${shownCount} of ${total} steps, ending where the program did:`;
+	}
+	return 'THIS IS WHAT ACTUALLY HAPPENED, EVERY STEP OF THE RUN:';
+}
+
+/**
+ * The problem the code is meant to solve, when the reader has pasted it.
+ *
+ * Without it the model has only the code to infer intent from, which is
+ * circular - the code is the thing that is wrong. With it, "your output
+ * differs" can become "the problem asks for the indices in ascending order".
+ */
+function problemBlock(problem) {
+	const text = (problem ?? '').trim();
+	if (!text) {
+		return [];
+	}
+	return [
+		'THE PROBLEM THEY ARE SOLVING, in their own words or pasted from the site:',
+		'```', text.slice(0, 4000), '```',
+		'This is what the code is SUPPOSED to do. Judge the code against this, not',
+		'against what the code appears to be trying to do.',
+		'',
+	];
+}
+
+/**
+ * Builds the user message. Everything here is fact: the traceback came from
+ * Python, the source is what ran, the output is what it printed, and the trace
+ * is the path it actually took.
+ */
+export function buildPrompt({ code, parsed, stdout, expected, values, trace, problem, question }) {
+	const parts = [...problemBlock(problem)];
 
 	if (parsed) {
 		parts.push('PYTHON REPORTED THIS ERROR:', '```', parsed.raw, '```', '');
@@ -172,6 +308,25 @@ export function buildPrompt({ code, parsed, stdout, expected, values, question }
 			'EXPECTED:', '```', expected, '```', '',
 			'ACTUALLY PRINTED:', '```', (stdout ?? '').trim() || '(nothing)', '```', '',
 			'SOURCE:', '```python', numbered, '```', '',
+		);
+
+		// The run was recorded, so the model does not have to simulate the loop
+		// it is being asked about - which is the step it gets wrong. Nothing
+		// raised here, so there are no crash values; this is all there is.
+		const steps = formatTrace(trace);
+		if (steps) {
+			parts.push(
+				traceHeading(trace, Math.min(24, trace.steps.length)),
+				'```', steps, '```',
+				'Each step is a line about to run, and the names that changed since the',
+				'step before it. This was recorded from the run. Quote these values; do',
+				'NOT invent a different value for any name that appears here, and do not',
+				'describe a path the program did not take.',
+				'',
+			);
+		}
+
+		parts.push(
 			'The expected output and the test input are both CORRECT. The bug is in the',
 			'logic, so never suggest changing the input or the expected value to match',
 			'what was printed.',
@@ -203,13 +358,33 @@ export function buildPrompt({ code, parsed, stdout, expected, values, question }
 	const recorded = values?.locals
 		? Object.entries(values.locals).slice(0, 6).map(([k, v]) => `${k} = ${v}`).join(', ')
 		: '';
+
+	// The same trick for the traced values, for the same reason: a model that is
+	// shown a loop and asked why the answer is wrong will describe the loop it
+	// expected rather than the one it was given, unless the real steps are in
+	// the instruction it reads last.
+	const lastStep = trace?.steps?.slice().reverse()
+		.find(s => s.vars && Object.keys(s.vars).length);
+	const returned = trace?.steps?.slice().reverse().find(s => s.ret !== undefined);
+	const traced = lastStep
+		? Object.entries(lastStep.vars).slice(0, 6).map(([k, v]) => `${k} = ${v}`).join(', ')
+			+ (returned ? `, and ${returned.fn}() returned ${returned.ret}` : '')
+		: '';
+
+	const against = (problem ?? '').trim()
+		? ' Answer against the problem statement, not against what the code looks like it is trying to do.'
+		: '';
+
 	const fallback = parsed
 		? (recorded
 			? `The recorded values were: ${recorded}. Using those exact numbers, what went wrong and why?`
 			: 'What is going wrong here, and why?')
 		: expected !== undefined
-			? 'Why is the output different from what I expected?'
-			: 'Is this output correct?';
+			? (traced
+				? `By line ${lastStep.line} the recorded values were: ${traced}. Using the recorded steps, not your own reconstruction, why is the output different from what I expected?${against}`
+				: `Why is the output different from what I expected?${against}`)
+			: `Is this output correct?${against}`;
+
 	parts.push(question || fallback);
 	return parts.join('\n');
 }
@@ -359,8 +534,8 @@ export const SYSTEM_PROMPT_OPTIMISE = [
  * The selection is what makes this useful: "why is this O(n^2)" means nothing
  * without knowing which part "this" is.
  */
-export function buildAskPrompt({ code, selection, question, parsed, expected, stdout, values }) {
-	const parts = [];
+export function buildAskPrompt({ code, selection, question, parsed, expected, stdout, values, trace, problem }) {
+	const parts = [...problemBlock(problem)];
 
 	const numbered = code.split('\n')
 		.map((l, i) => `${String(i + 1).padStart(4)}  ${l}`)
@@ -388,6 +563,14 @@ export function buildAskPrompt({ code, selection, question, parsed, expected, st
 		);
 	} else if (stdout && stdout.trim()) {
 		parts.push('THE LAST RUN PRINTED:', '```', stdout.trim().slice(0, 1000), '```', '');
+	}
+
+	// Shorter than the explanation's copy: a follow-up usually already has an
+	// answer above it, and the turns kept as history are competing for the same
+	// context. Enough to settle "how many times did that loop run".
+	const steps = formatTrace(trace, 14);
+	if (steps) {
+		parts.push('THE PATH THAT RUN TOOK (line, then what changed):', '```', steps, '```', '');
 	}
 
 	parts.push(question);
