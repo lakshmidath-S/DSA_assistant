@@ -223,10 +223,19 @@ export function formatTrace(trace, limit = 24) {
 	}
 
 	const shown = steps.slice(-limit);
+	const from = steps.length - shown.length;
 	const lines = [];
 	let frame = '';
 
-	for (const step of shown) {
+	for (const [offset, step] of shown.entries()) {
+		// The seam between the recorded opening and the recorded ending. Shown
+		// where it falls, because a silent jump from the second iteration to
+		// the fifteen-thousandth reads as a loop that ran twice.
+		if (trace.dropped && from + offset === trace.gapAt) {
+			lines.push(`  ... ${trace.dropped} steps not recorded ...`);
+			frame = '';
+		}
+
 		const here = `${step.fn}#${step.d}`;
 		if (here !== frame) {
 			frame = here;
@@ -253,13 +262,29 @@ export function formatTrace(trace, limit = 24) {
 /** How the trace should be introduced, given what was left out of it. */
 function traceHeading(trace, shownCount) {
 	const total = trace.steps.length;
+	const dropped = trace.dropped ?? 0;
+
 	if (trace.truncated) {
 		return [
-			`THIS IS WHAT ACTUALLY HAPPENED, STEP BY STEP. Recording stopped after`,
-			`${total} steps and the program carried on past them, so these are steps`,
-			`from the MIDDLE of the run, not the end. Do not say the program ended here.`,
+			'THIS IS WHAT ACTUALLY HAPPENED, STEP BY STEP - but recording stopped',
+			'before the program did, so these steps are from the MIDDLE of the run.',
+			'Do not say the program ended here.',
 		].join(NL);
 	}
+
+	// The middle was dropped to keep the recording small. Saying so matters as
+	// much as the truncation warning: without it the jump from the opening to
+	// the closing steps reads as one continuous run, and a loop that ran
+	// fifteen thousand times looks like it ran twice.
+	if (dropped) {
+		return [
+			'THIS IS WHAT ACTUALLY HAPPENED. The opening and the ending are',
+			`recorded exactly, but ${dropped} steps in the MIDDLE were dropped and are`,
+			'marked below. The run did reach its end; the gap is missing detail,',
+			'not a missing ending.',
+		].join(NL);
+	}
+
 	if (shownCount < total) {
 		return `THIS IS WHAT ACTUALLY HAPPENED - the last ${shownCount} of ${total} steps, ending where the program did:`;
 	}

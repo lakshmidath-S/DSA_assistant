@@ -32,7 +32,9 @@ Usage:  python harness.py <target.py>
 import json
 import os
 import sys
+import time
 import traceback
+from collections import deque
 
 MAX_VARS = 40
 MAX_REPR = 200
@@ -40,7 +42,20 @@ MAX_REPR = 200
 # Tracing limits. These bound the cost, and the cost is the reason they exist: a
 # line event on every line of a tight loop is the difference between a run that
 # feels instant and one that feels broken.
-MAX_STEPS = 300        # after this, tracing is switched off, not merely ignored
+# The recording keeps both ends of a run and drops the middle.
+#
+# Keeping only the first N steps - which is what this did at first - is the
+# wrong half. Setup is rarely where the bug is, and a wrong answer produced on
+# the ten thousandth iteration fell off the end of the recording entirely. But
+# a rolling window alone means tracing every line to the very end, and that is
+# what makes a hot loop crawl. So: the head is kept whole, the tail rolls, and
+# tracing gives up after a fixed slice of wall time - by which point either the
+# program is nearly done or its middle was never going to be readable anyway.
+KEEP_HEAD = 80         # the opening, kept exactly: arguments, setup, first pass
+KEEP_TAIL = 220        # a rolling window on the end, where the answer is made
+TRACE_BUDGET_S = 1.0   # wall time spent tracing before it switches itself off
+BUDGET_EVERY = 2048    # events between clock checks; checking each one costs more
+
 MAX_TRACE_VARS = 12    # names reported per step
 MAX_TRACE_NAMES = 40   # names followed at all, per frame
 MAX_TRACE_REPR = 120
@@ -138,9 +153,13 @@ class Tracer:
 
     def __init__(self, target):
         self.target = target
-        self.steps = []
+        self.head = []
+        self.tail = deque(maxlen=KEEP_TAIL)
+        self.dropped = 0
         self.truncated = False
         self.done = False
+        self.events = 0
+        self.started = time.monotonic()
         self.depth = 0
         # Keyed by id(frame): the depth it was called at, and the last repr seen
         # for each name, so a step can report only what changed.
@@ -251,17 +270,41 @@ class Tracer:
     def record(self, step):
         if not step.get("vars"):
             step.pop("vars", None)
-        self.steps.append(step)
-        if len(self.steps) >= MAX_STEPS:
-            self.truncated = True
-            self.done = True
-            self.uninstall()
+
+        if len(self.head) < KEEP_HEAD:
+            self.head.append(step)
+        else:
+            # Full deque: whatever it evicts is a step nobody will ever see,
+            # and counting those is what lets the reader be told the middle is
+            # missing rather than left to assume the run was short.
+            if len(self.tail) == KEEP_TAIL:
+                self.dropped += 1
+            self.tail.append(step)
+
+        self.events += 1
+        if self.events % BUDGET_EVERY == 0:
+            if time.monotonic() - self.started > TRACE_BUDGET_S:
+                self.truncated = True
+                self.done = True
+                self.uninstall()
+
+    @property
+    def steps(self):
+        return self.head + list(self.tail)
 
     def report(self):
         """One line on stderr, or nothing at all when nothing ran."""
         if not self.steps:
             return
-        payload = {"steps": self.steps, "truncated": self.truncated, "limit": MAX_STEPS}
+        payload = {
+            "steps": self.steps,
+            "truncated": self.truncated,
+            "dropped": self.dropped,
+            # Where the gap falls, so the reader is shown it in the right place
+            # rather than left to infer it from a jump in line numbers.
+            "gapAt": len(self.head) if self.dropped else None,
+            "limit": KEEP_HEAD + KEEP_TAIL,
+        }
         sys.stderr.write(TRACE_MARKER + json.dumps(payload) + "\n")
 
 

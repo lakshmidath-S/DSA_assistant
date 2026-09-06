@@ -35,7 +35,9 @@ quieter button rather than the default.
   can walk back through it: drag the scrubber and the marker moves down the
   editor while the variables fill in beside it — the list growing, the dict
   filling, the index going one too far. This is the only account of a run that
-  finished and printed the wrong answer, because nothing raised.
+  finished and printed the wrong answer, because nothing raised. The marks
+  follow the code as you edit it, rather than pointing at whatever has since
+  moved into that line number.
 - **Tell it the problem.** Paste the question you are solving into *The problem*
   and the explanation is judged against what the code was *meant* to do, rather
   than against what the code looks like it is trying to do — which is circular,
@@ -209,12 +211,21 @@ So the harness also installs `sys.settrace`, filtered to the user's own file,
 and records `(line, the names that changed)`. The wrong-answer prompt carries
 the tail of that, and the panel can scrub through all of it.
 
-Tracing every line is slow, so recording stops at 300 steps by *uninstalling the
-trace function* rather than by continuing to pay for events it will discard. A
-400,000-iteration loop measured the same with tracing as without, to within
-noise. Truncation is then stated in the prompt in as many words, because the
-steps shown are from the middle of a longer run and a model told nothing about
-that will confidently explain a program that ended where the recording did.
+Both ends of a run are kept and the middle is dropped. Keeping only the first
+N steps was the wrong half: setup is rarely where the bug is, and an answer
+produced on the ten-thousandth iteration fell off the recording entirely. So
+the opening 80 steps are kept exactly, the last 220 roll, and what falls out
+between them is counted and reported - a 5,000-iteration loop keeps 300 steps,
+drops 14,704, and still records the branch that only runs on the final pass.
+
+Tracing also gives itself a second of wall time. Past that it switches itself
+off, because a 400,000-iteration loop cannot be traced to its end at any
+acceptable price: that costs about a second over the untraced run, against
+losing the ending. When that happens the prompt is told in as many words, since
+a model shown the last recorded step and nothing else will confidently explain
+a program that ended where the recording did. The dropped middle is stated too,
+and marked where it falls - otherwise a jump from the second iteration to the
+last reads as a loop that ran twice.
 
 Two things fall out of tracing that an exception handler cannot give at all:
 a **caught** exception, which never reaches a traceback and is a real way to

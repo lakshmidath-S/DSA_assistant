@@ -162,19 +162,51 @@ assert.ok(exc[0].exc.startsWith('ValueError:'), exc[0].exc);
 assert.strictEqual(exc[0].line, 4);
 console.log('ok    a caught exception is recorded');
 
-// The cap has to switch tracing off rather than keep paying for it: this loop
-// runs 200k times, and a run that recorded all of it would not finish here.
+// A long run keeps both ENDS and drops the middle.
+//
+// Keeping the first N steps was the wrong half: setup is rarely where the bug
+// is, and an answer produced on the last iteration fell off the recording
+// entirely. The head is kept whole, the tail rolls, and the middle is dropped
+// and counted.
+const longFile = join(dir, 'long.py');
+writeFileSync(longFile, 'total = 0\nfor i in range(5000):\n    if i == 4999:\n        total = -1\n    else:\n        total += i\nprint(total)\n', 'utf8');
+
+const longTrace = split(run([HARNESS, longFile]).stderr).trace;
+assert.ok(longTrace.dropped > 0, 'the middle of a long run is dropped');
+assert.strictEqual(longTrace.steps.length, longTrace.limit, 'both ends are kept, and only those');
+assert.strictEqual(longTrace.truncated, false, 'it reached the end within its budget');
+assert.strictEqual(longTrace.steps[0].line, 1, 'the opening is kept exactly');
+assert.strictEqual(longTrace.gapAt, 80, 'the gap is reported where it falls');
+
+// The point of the change: the branch that only runs on the LAST iteration,
+// and the print after the loop, are both in the recording.
+assert.ok(longTrace.steps.some(s => s.line === 4),
+	'the final-iteration branch must be recorded');
+assert.ok(longTrace.steps.some(s => s.line === 7),
+	'the line after the loop must be recorded');
+console.log(`ok    a long run keeps both ends (${longTrace.steps.length} kept, ${longTrace.dropped} dropped)`);
+
+// A genuinely hot loop cannot be traced to its end at any acceptable price, so
+// tracing gives itself a wall-clock budget and says plainly that it stopped
+// early. Bounded cost matters more here than a complete recording - and the
+// prompt is told not to claim the program ended where the recording did.
 const hotFile = join(dir, 'hot.py');
-writeFileSync(hotFile, 'total = 0\nfor i in range(200000):\n    total += i\nprint(total)\n', 'utf8');
+writeFileSync(hotFile, 'total = 0\nfor i in range(400000):\n    total += i\nprint(total)\n', 'utf8');
+
+const bareStarted = Date.now();
+run([hotFile]);
+const bareMs = Date.now() - bareStarted;
+
 const hotStarted = Date.now();
 const hot = run([HARNESS, hotFile]);
 const hotMs = Date.now() - hotStarted;
 const hotTrace = split(hot.stderr).trace;
-assert.strictEqual(hot.stdout.trim(), '19999900000', 'the program still runs to completion');
-assert.strictEqual(hotTrace.truncated, true, 'the cap was hit');
-assert.strictEqual(hotTrace.steps.length, hotTrace.limit, 'and stopped exactly at it');
-assert.ok(hotMs < 10_000, `tracing must switch off at the cap, took ${hotMs}ms`);
-console.log(`ok    tracing stops at the cap (${hotTrace.limit} steps, ${hotMs}ms)`);
+
+assert.strictEqual(hot.stdout.trim(), '79999800000', 'the program still runs to completion');
+assert.strictEqual(hotTrace.truncated, true, 'it admits it stopped early');
+assert.ok(hotMs - bareMs < 4000,
+	`tracing must stay within its budget: ${hotMs}ms traced vs ${bareMs}ms bare`);
+console.log(`ok    a hot loop is bounded and says so (+${hotMs - bareMs}ms over ${bareMs}ms)`);
 
 // sys.exit codes belong to the program, not the harness.
 const exitFile = join(dir, 'exit.py');

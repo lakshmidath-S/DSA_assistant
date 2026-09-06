@@ -1628,12 +1628,61 @@ function valueRow(name, repr, changed = false) {
 // run that printed the wrong answer without crashing, it is the only account of
 // what happened at all.
 
+/**
+ * Anchors for the recorded lines, so a step still points at its own code after
+ * the file has been edited.
+ *
+ * A step remembers the line number it happened on, and a line number stops
+ * being true the moment anything above it is added or removed - so stepping
+ * after an edit marked whatever had since moved into that position, with no
+ * sign that it was the wrong line. Monaco moves a decoration with the text it
+ * covers, so one invisible decoration per recorded line turns a number that
+ * rots into a reference that does not.
+ */
+let traceAnchors;
+let traceAnchorOf;
+
+function anchorTrace(steps) {
+	traceAnchors?.clear();
+	traceAnchorOf = new Map();
+	if (!editor || !steps.length) {
+		return;
+	}
+
+	const lineCount = editor.getModel().getLineCount();
+	const lines = [...new Set(steps.map(step => step.line))]
+		.filter(line => line >= 1 && line <= lineCount)
+		.sort((a, b) => a - b);
+
+	traceAnchors = editor.createDecorationsCollection(lines.map(line => ({
+		range: new monaco.Range(line, 1, line, 1),
+		// No class and no glyph: this draws nothing. It exists only to be
+		// carried along by the edits that follow.
+		options: { stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges },
+	})));
+
+	lines.forEach((line, index) => traceAnchorOf.set(line, index));
+}
+
+/** Where a recorded line has ended up, after whatever editing has happened. */
+function livingLine(recorded) {
+	const index = traceAnchorOf?.get(recorded);
+	if (index === undefined || !traceAnchors) {
+		return recorded;
+	}
+	return traceAnchors.getRange(index)?.startLineNumber ?? recorded;
+}
+
 /** The steps of the last run, and where the scrubber is in them. */
 let traceSteps = [];
 let traceAt = 0;
+/** The whole recording, for the things that are about it rather than in it. */
+let lastTrace;
 
 function showTrace(trace) {
+	lastTrace = trace;
 	traceSteps = trace?.steps ?? [];
+	anchorTrace(traceSteps);
 	traceAt = 0;
 	traceDecorations.clear();
 
@@ -1642,16 +1691,20 @@ function showTrace(trace) {
 		return;
 	}
 
-	els.traceCount.textContent = trace.truncated
-		? `first ${traceSteps.length} steps`
+	const dropped = trace.dropped ?? 0;
+	els.traceCount.textContent = dropped
+		? `${traceSteps.length} of ${traceSteps.length + dropped} steps`
 		: `${traceSteps.length} step${traceSteps.length === 1 ? '' : 's'}`;
 
-	// Truncation is not a detail: the recording stops but the program does not,
-	// so the last step shown is not where the run ended.
-	els.traceNote.hidden = !trace.truncated;
+	// Both of these change what the last step means, so neither is a detail.
+	// Truncated: the program carried on past the recording. Dropped: it did
+	// reach its end, but the middle is missing.
+	els.traceNote.hidden = !trace.truncated && !dropped;
 	els.traceNote.textContent = trace.truncated
-		? `Recording stopped after ${trace.limit} steps to keep the run fast. The program carried on past the last step here.`
-		: '';
+		? 'Recording stopped early to keep the run fast, so the program carried on past the last step here.'
+		: dropped
+			? `The opening and the ending are recorded exactly; ${dropped} steps in the middle were dropped.`
+			: '';
 
 	els.traceScrub.max = String(traceSteps.length - 1);
 	els.traceScrub.value = '0';
@@ -1719,13 +1772,19 @@ function setStep(index, reveal = true) {
 		els.traceWhere.textContent = `${traceAt + 1}/${traceSteps.length} · about to run line ${step.line} in ${where}`;
 	}
 
+	// Landing on the first step after the gap without being told would read as
+	// one continuous run that skipped from the second pass to the last.
+	if (lastTrace?.dropped && traceAt === lastTrace.gapAt) {
+		els.traceWhere.textContent += `  · ${lastTrace.dropped} steps before this were not recorded`;
+	}
+
 	els.traceVars.textContent = '';
 	const changed = new Set(Object.keys(step.vars ?? {}));
 	for (const [name, value] of stateAt(traceAt)) {
 		els.traceVars.appendChild(valueRow(name, value, changed.has(name)));
 	}
 
-	markStep(step.line, reveal);
+	markStep(livingLine(step.line), reveal);
 }
 
 /** Puts the step on the code, the way an error is put on the code. */
