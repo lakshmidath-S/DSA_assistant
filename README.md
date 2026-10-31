@@ -17,11 +17,27 @@ with a question. It never writes the corrected code. When you have genuinely
 looked and are stuck, *Show the fix* is there — deliberately as a second,
 quieter button rather than the default.
 
+## The window
+
+The left side is yours and reads top to bottom in the order you work: the
+problem you are solving, your code, and what it printed beside what it should
+have printed. The right side is the tutor's: what went wrong, the step-through,
+and the questions you asked about it, with the question box at the bottom.
+
+It is drawn as a chalkboard - a green slate with chalk-white writing - and the
+few colours each mean one thing: yellow for something you can do, pink for an
+error, orange for a wrong answer, mint for a clean run. Fonts are the system's
+own (Bahnschrift, Segoe UI and Cascadia Code on Windows, with fallbacks
+elsewhere), so nothing is downloaded and nothing is bundled.
+
 ## What it does
 
 - Opens blank, or on the file you had last.
 - **Run** (<kbd>Ctrl</kbd>+<kbd>Enter</kbd>) executes the buffer and streams the
-  output. A run still going after 15 seconds is stopped.
+  output. **Stop** ends it; a run still going after 15 seconds is stopped for
+  you and said so, rather than reported as clean.
+- There is no keyboard input. A program that calls `input()` fails at once with
+  an `EOFError` and a note saying so - put the test values in the code instead.
 - When it **crashes**, the failing line is marked in the editor: gutter dot,
   tinted row, and a squiggle under the exact span Python blamed. Editing clears
   the mark.
@@ -38,8 +54,8 @@ quieter button rather than the default.
   finished and printed the wrong answer, because nothing raised. The marks
   follow the code as you edit it, rather than pointing at whatever has since
   moved into that line number.
-- **Tell it the problem.** Paste the question you are solving into *The problem*
-  and the explanation is judged against what the code was *meant* to do, rather
+- **Tell it the problem.** Paste the question you are solving into *Problem*,
+  above the code, and the explanation is judged against what the code was *meant* to do, rather
   than against what the code looks like it is trying to do — which is circular,
   since the code is the thing that is wrong.
 - Either way a local model explains it, unprompted — what went wrong and why,
@@ -47,7 +63,7 @@ quieter button rather than the default.
   the recorded steps, so it reads facts instead of simulating the program.
   *Explain again* re-asks; *Show the fix* gives the corrected line when you
   want it.
-- **Ask follow-ups.** The box at the bottom of the panel takes any question
+- **Ask follow-ups.** The box at the bottom of the right-hand panel takes any question
   about your code, and remembers the last two exchanges, so a bare "why?" still
   has a subject. Answers stack as notes, not as a chat transcript. Only the
   last two exchanges are sent with a new question; older ones stay on screen.
@@ -63,8 +79,10 @@ quieter button rather than the default.
   shown before it is acted on, then the question goes into the thread like any
   other and the answer streams in. Every step names itself and counts its
   seconds; nothing fails silently.
-- **Settings** (the gear on the title bar, which also shows what is answering)
-  holds the setup checklist and the model list. Every model on every running
+- **Settings** (the model's name on the title bar) holds the setup checklist and
+  the model list. The dot beside the name says whether anything can answer:
+  mint when the model is loaded, yellow while it loads, pink when it could not
+  load or nothing is running. Every model on every running
   server is listed under its server; choosing one switches to that server, and
   starts it if it is not running.
 - **It starts itself.** On launch myIDE starts the server your chosen model
@@ -85,8 +103,8 @@ npm start
 ```
 
 Node and Python 3 need to be on PATH; nothing else is required to run code. On
-first launch a **Finish setting up** checklist appears in the side panel and
-covers the rest:
+first launch a **Finish setting up** note appears in the right-hand panel and
+opens a checklist that covers the rest:
 
 | It finds | It does |
 | --- | --- |
@@ -421,8 +439,14 @@ $env:STUDIO_SHOT_RUN  = 3000                # click Run first, wait this long
 $env:STUDIO_SHOT_ASK  = 45000               # then click Explain again
 $env:STUDIO_SHOT_EXIT = 1                   # quit after capturing
 $env:STUDIO_EVAL      = "..."               # run JS in the page first
+$env:STUDIO_SIZE      = '1400x900'          # window size for the capture
 npm start
 ```
+
+In this mode the page's timers are not throttled. A window launched from a
+script usually opens behind the terminal, and Chromium throttles an occluded
+page to as little as one timer a minute - a one-second wait in a test took
+sixty, and every timing it reported was wrong.
 
 ## If you edit boot.js
 
@@ -465,6 +489,23 @@ pressed, and a question asked while an explanation was still arriving. 66 of
 killed mid-session gave "Ollama is not running." with the question kept, and
 **Start it** brought it back and answered in 16s.
 
+Then, for the redesign, one script driving every control in the real app,
+56 checks, all passing: a clean run, its output and its step-through (next,
+previous, the editor marker, the values); expected output matching; a crash
+with its line marked, the values shown, the explanation arriving with no code
+in it, *Go to line*, *Explain again* and *Show the fix*; a SyntaxError; a
+wrong answer, its diff, explanation and fix; a follow-up, a question scoped to
+selected code, both quick buttons, clearing the notes; Settings listing the
+models and the checklist, and closing on Escape; both drawers; `input()`
+failing in 0.65s; Stop ending a run in under half a second; Stop still
+working on the second of two overlapping runs; 20,000 printed lines; streamed
+output appearing while the program runs; Unicode output; a RecursionError; and
+font zoom. Four bugs found on the way are fixed: `input()` waited out the full
+15 seconds and was then called a possible infinite loop; a stopped run was
+reported as running cleanly; a run started while another was going could no
+longer be stopped, or timed out, at all; and 20,000 lines printed in 0.8s took
+149s to appear, because each line was drawn on its own.
+
 Not exercised: a first-time download of a model that is not already on disk; the
 packaged app's **Run** button specifically (the harness was invoked directly from
 its packaged location instead, because `STUDIO_SHOT` is deliberately refused
@@ -486,6 +527,13 @@ The plan, and the notes needed to pick it up cold, are in **[NEXT.md](NEXT.md)**
   the 1.5B until someone picks the 7B in Settings.
 - **The problem statement is never cleared for you.** It survives restarts,
   and if it describes an older problem, every answer is judged against that.
+  It sits above the code, open whenever it has something in it, so a stale one
+  is at least in plain sight.
+- **No keyboard input.** `input()` fails with an `EOFError`; there is no box to
+  type a program's input into.
+- **The 1.5B can misread a wrong answer.** On the `two_sum` that returns its
+  indices backwards it has described an IndexError that never happened. The
+  diff and the step-through beside it show what really happened.
 - **One test case.** *Expected output* holds a single expected string, not a
   table of cases.
 - **`values` only at a crash.** The dedicated variables panel still needs an

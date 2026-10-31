@@ -17,15 +17,16 @@
 			<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" /></svg>
 			<span>Run</span>
 		</button>
-		<button id="stop" class="ghost" hidden title="Stop">
+		<button id="stop" class="ghost stop" hidden title="Stop the run">
 			<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1" /></svg>
+			<span>Stop</span>
 		</button>
 
-		<span id="status" class="status"></span>
+		<span id="status" class="status" aria-live="polite"></span>
 
 		<span class="spacer"></span>
 
-		<button id="mic" class="ghost mic" title="Click to talk, click again to send (Ctrl+Alt+V)">
+		<button id="mic" class="ghost mic" title="Click to talk, click again to send (Ctrl+Alt+V)" aria-label="Ask out loud">
 			<svg viewBox="0 0 16 16" aria-hidden="true">
 				<path d="M8 10a2.5 2.5 0 0 0 2.5-2.5v-3a2.5 2.5 0 0 0-5 0v3A2.5 2.5 0 0 0 8 10z" />
 				<path d="M4 7.5a4 4 0 0 0 8 0" fill="none" stroke="currentColor" stroke-width="1.2" />
@@ -34,31 +35,70 @@
 		</button>
 		<!-- The active model, and the way into Settings. Which model answers is
 		     the one setting worth changing while working, so it is on the bar;
-		     everything about choosing it lives behind the button. -->
-		<button id="settings-open" class="model" title="Settings">
+		     the dot says whether it is ready, loading or broken at a glance. -->
+		<button id="settings-open" class="model" title="Settings" data-state="loading">
+			<span class="model-dot" aria-hidden="true"></span>
+			<span id="model-label">no model yet</span>
 			<svg viewBox="0 0 16 16" aria-hidden="true" class="gear">
 				<path d="M8 5.5A2.5 2.5 0 1 0 8 10.5 2.5 2.5 0 0 0 8 5.5zm6.4 2.5c0-.4 0-.7-.1-1l1.4-1-1.5-2.6-1.7.6a5.9 5.9 0 0 0-1.7-1L10.5 1h-3l-.3 1.9a5.9 5.9 0 0 0-1.7 1l-1.7-.6L2.3 6l1.4 1a6 6 0 0 0 0 2l-1.4 1 1.5 2.6 1.7-.6c.5.4 1.1.8 1.7 1l.3 1.9h3l.3-1.9a5.9 5.9 0 0 0 1.7-1l1.7.6 1.5-2.6-1.4-1c.1-.3.1-.6.1-1z" />
 			</svg>
-			<span id="model-label">no model yet</span>
 		</button>
 	</header>
 
 	<main>
-		<section class="editor-pane">
-			<div id="editor"></div>
-			<div id="empty" class="empty" hidden>
-				<p class="empty-title">Write some Python, then press Run.</p>
-				<p class="empty-keys"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> runs it &nbsp;·&nbsp;
-					<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> to ask out loud (click again to send)</p>
-			</div>
-			<div id="voice-overlay" class="voice-overlay" hidden>
-				<canvas id="wave" class="wave"></canvas>
-				<div id="voice-state" class="voice-state">Listening…</div>
-			</div>
+		<!-- The student's side: what they are solving, their code, and what it
+		     printed against what it should have printed - in reading order. -->
+		<section class="work">
+			<!-- Above the code rather than tucked under the answers: a problem
+			     statement left over from yesterday skews every answer, and here it
+			     is in plain sight. -->
+			<section class="drawer problem-drawer">
+				<button id="problem-toggle" class="drawer-head" aria-expanded="false">
+					<span class="chev" aria-hidden="true">&#9656;</span>
+					<span class="drawer-title">Problem</span>
+					<span class="opt">optional · paste the question so answers are judged against it</span>
+				</button>
+				<textarea id="problem" class="drawer-box" hidden rows="4"
+					placeholder="Paste the question you are solving.&#10;Without it, an explanation can only guess at what the code was meant to do."></textarea>
+			</section>
+
+			<section class="editor-pane">
+				<div id="editor"></div>
+				<div id="empty" class="empty" hidden>
+					<p class="empty-title">Write some Python, then press Run.</p>
+					<p class="empty-keys"><kbd>Ctrl</kbd> <kbd>Enter</kbd> runs it</p>
+					<p class="empty-keys"><kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>V</kbd> asks out loud</p>
+				</div>
+				<div id="voice-overlay" class="voice-overlay" hidden>
+					<canvas id="wave" class="wave"></canvas>
+					<div id="voice-state" class="voice-state">Listening…</div>
+				</div>
+			</section>
+
+			<!-- Side by side, because comparing them is the whole job. -->
+			<section class="console">
+				<section class="out-pane">
+					<div class="pane-head"><span class="pane-title">Output</span></div>
+					<pre id="out" class="out"></pre>
+					<p id="out-empty" class="out-empty">Whatever your program prints will appear here.</p>
+				</section>
+
+				<section class="drawer expect-drawer">
+					<button id="expect-toggle" class="drawer-head" aria-expanded="false">
+						<span class="chev" aria-hidden="true">&#9656;</span>
+						<span class="drawer-title">Expected output</span>
+						<span class="opt">optional</span>
+					</button>
+					<textarea id="expect" class="drawer-box" hidden rows="3"
+						placeholder="Paste what the correct answer should print.&#10;Each run is checked against it."></textarea>
+				</section>
+			</section>
 		</section>
 
 		<div id="splitter" class="splitter" title="Drag to resize"></div>
 
+		<!-- The tutor's side. Not a chat: one problem, pointed at and explained,
+		     then the questions asked about it. -->
 		<aside class="side">
 			<div class="side-top">
 				<!-- The checklist itself lives in Settings; this is only the nudge
@@ -68,16 +108,17 @@
 					<span class="setup-banner-title">Finish setting up</span>
 					<span id="setup-banner-note" class="setup-banner-note"></span>
 				</button>
+
 				<!-- A wrong answer is not a crash, and needs its own card. -->
 				<section id="diff-card" class="card wrong" hidden>
-					<div class="card-head"><span class="err-type wrong">Wrong answer</span></div>
+					<div class="card-head"><h2 class="err-type wrong">Wrong answer</h2></div>
 					<div class="diff">
 						<div class="diff-col">
-							<span class="diff-label">expected</span>
+							<span class="diff-label">Expected</span>
 							<pre id="diff-want" class="diff-text"></pre>
 						</div>
 						<div class="diff-col">
-							<span class="diff-label">got</span>
+							<span class="diff-label">Got</span>
 							<pre id="diff-got" class="diff-text bad"></pre>
 						</div>
 					</div>
@@ -89,46 +130,47 @@
 					</div>
 				</section>
 
-			<!-- The error card. Not a chat: one problem, pointed at, explained. -->
-			<section id="card" class="card" hidden>
-				<div class="card-head">
-					<span id="err-type" class="err-type"></span>
-					<button id="jump" class="link">go to line</button>
-				</div>
-				<p id="err-hint" class="hint"></p>
-				<pre id="err-line" class="err-line"></pre>
+				<!-- The error card. One problem, pointed at, explained. -->
+				<section id="card" class="card crash" hidden>
+					<div class="card-head">
+						<h2 id="err-type" class="err-type"></h2>
+						<button id="jump" class="link">Go to line</button>
+					</div>
+					<p id="err-msg" class="err-msg"></p>
+					<p id="err-hint" class="hint"></p>
+					<pre id="err-line" class="err-line"></pre>
 					<div id="values" class="values" hidden>
-						<span class="values-head">values at that moment</span>
+						<span class="values-head">Values at that moment</span>
 						<table id="values-rows" class="values-rows"></table>
 					</div>
-				<div id="explain" class="explain"></div>
-				<div class="card-foot">
-					<button id="ask" class="ghost small">Explain again</button>
-					<button id="reveal" class="ghost small quiet">Show the fix</button>
-					<span id="ai-meta" class="meta"></span>
-				</div>
-			</section>
+					<div id="explain" class="explain"></div>
+					<div class="card-foot">
+						<button id="ask" class="ghost small">Explain again</button>
+						<button id="reveal" class="ghost small quiet">Show the fix</button>
+						<span id="ai-meta" class="meta"></span>
+					</div>
+				</section>
 
-			<section id="ok-card" class="card ok" hidden>
-				<div class="card-head"><span class="err-type ok">Ran cleanly</span></div>
-				<p id="ok-meta" class="hint"></p>
-				<pre id="ok-out" class="err-line" hidden></pre>
-			</section>
+				<section id="ok-card" class="card ok" hidden>
+					<div class="card-head"><h2 id="ok-title" class="err-type ok">Ran cleanly</h2></div>
+					<p id="ok-meta" class="hint"></p>
+					<pre id="ok-out" class="err-line" hidden></pre>
+				</section>
 
 				<!-- The run went somewhere whether or not it crashed. Dragging the
 				     scrubber walks the line marker back through the editor. -->
 				<section id="trace-card" class="card trace" hidden>
-					<button id="trace-toggle" class="card-head trace-head" aria-expanded="false">
-						<span class="chev">&#9656;</span>
-						<span class="err-type trace">Step through</span>
+					<button id="trace-toggle" class="trace-head" aria-expanded="false">
+						<span class="chev" aria-hidden="true">&#9656;</span>
+						<span class="trace-title">Step through</span>
 						<span id="trace-count" class="meta"></span>
 					</button>
 					<div id="trace-body" hidden>
 						<div class="trace-controls">
-							<button id="trace-prev" class="ghost small" title="Previous step (Alt+Left)">&#8249;</button>
+							<button id="trace-prev" class="ghost small step-btn" title="Previous step (Alt+Left)" aria-label="Previous step">&#8249;</button>
 							<input id="trace-scrub" class="trace-scrub" type="range" min="0" max="0" value="0"
 								aria-label="Step">
-							<button id="trace-next" class="ghost small" title="Next step (Alt+Right)">&#8250;</button>
+							<button id="trace-next" class="ghost small step-btn" title="Next step (Alt+Right)" aria-label="Next step">&#8250;</button>
 						</div>
 						<p id="trace-where" class="trace-where"></p>
 						<table id="trace-vars" class="values-rows"></table>
@@ -137,74 +179,55 @@
 				</section>
 
 				<div id="thread" class="thread"></div>
+
+				<p id="side-empty" class="side-empty">
+					Run your code. If it crashes or prints the wrong thing, the reason
+					appears here - explained, not fixed for you.
+				</p>
 			</div>
 
-			<!-- Ask bar. Not a chat transcript: a question box that knows what you
-			     have selected, plus the two questions worth a dedicated button. -->
+			<!-- Ask bar. A question box that knows what you have selected, plus the
+			     two questions worth a dedicated button. -->
 			<section class="ask-bar">
 				<div id="sel-chip" class="sel-chip" hidden>
-					<span class="sel-label">about</span>
+					<span class="sel-label">About</span>
 					<code id="sel-text"></code>
-					<button id="sel-clear" class="sel-x" title="Ask about the whole file instead">&times;</button>
+					<button id="sel-clear" class="sel-x" title="Ask about the whole file instead" aria-label="Ask about the whole file instead">&times;</button>
 				</div>
 				<div class="ask-row">
 					<input id="ask-input" class="ask-input" type="text"
-						placeholder="Ask about your code…  (select part of it first to narrow the question)">
-					<button id="ask-send" class="ghost small" title="Ask (Enter)">Ask</button>
+						placeholder="Ask about your code, or select part of it first">
+					<button id="ask-send" class="ask-send" title="Ask (Enter)">Ask</button>
 				</div>
 				<div class="ask-quick">
-					<button id="ask-complexity" class="ghost small">Time &amp; space</button>
-					<button id="ask-optimise" class="ghost small">Can it be faster?</button>
-					<button id="thread-clear" class="link">clear</button>
+					<button id="ask-complexity" class="chip">Time &amp; space</button>
+					<button id="ask-optimise" class="chip">Can it be faster?</button>
+					<span class="spacer"></span>
+					<button id="thread-clear" class="link">Clear notes</button>
 				</div>
-			</section>
-
-			<!-- What the code is meant to do, and what it is meant to print. The
-			     model has seen neither; without them it infers intent from the
-			     code, which is the thing that is wrong. -->
-			<section class="expect">
-				<button id="problem-toggle" class="expect-head" aria-expanded="false">
-					<span class="chev">&#9656;</span> The problem <span class="opt">optional</span>
-				</button>
-				<textarea id="problem" class="expect-box" hidden rows="4"
-					placeholder="Paste the question you are solving.&#10;Without it, an explanation can only guess at what the code was meant to do."></textarea>
-			</section>
-
-			<section class="expect">
-				<button id="expect-toggle" class="expect-head" aria-expanded="false">
-					<span class="chev">&#9656;</span> Expected output <span class="opt">optional</span>
-				</button>
-				<textarea id="expect" class="expect-box" hidden rows="3"
-					placeholder="Paste what the correct answer should print.&#10;Each run is checked against it."></textarea>
-			</section>
-
-			<section class="out-pane">
-				<div class="out-head">Output</div>
-				<pre id="out" class="out"></pre>
-				<p id="out-empty" class="out-empty">Whatever your program prints will appear here.</p>
 			</section>
 		</aside>
 	</main>
 
-	<!-- Settings. One sheet, and for now one thing in it: which model answers,
-	     and which server has to be running for it to. -->
+	<!-- Settings. One sheet: which model answers, and which server has to be
+	     running for it to. -->
 	<div id="settings" class="sheet" hidden>
 		<div class="sheet-card" role="dialog" aria-modal="true" aria-label="Settings">
 			<div class="sheet-head">
-				<span class="sheet-title">Settings</span>
+				<h2 class="sheet-title">Settings</h2>
 				<button id="settings-close" class="ghost small">Done</button>
 			</div>
 
-			<section id="setup" class="card setup">
-				<div class="card-head">
-					<span class="setup-title">Finish setting up</span>
-					<button id="setup-recheck" class="link">re-check</button>
+			<section id="setup" class="setup">
+				<div class="setting-row">
+					<h3 class="setting-title">Setup</h3>
+					<button id="setup-recheck" class="link">Re-check</button>
 				</div>
 				<ul id="setup-steps" class="steps"></ul>
 			</section>
 
 			<section class="setting">
-				<div class="setting-title">Model</div>
+				<h3 class="setting-title">Model</h3>
 				<p class="setting-note">
 					myIDE starts only the server your chosen model needs, and starts
 					that same one for you next time. Choosing a model on the other

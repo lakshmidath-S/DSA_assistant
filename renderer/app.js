@@ -27,8 +27,8 @@ const $ = id => document.getElementById(id);
 
 const els = {
 	run: $('run'), stop: $('stop'), status: $('status'), mic: $('mic'),
-	out: $('out'), card: $('card'), okCard: $('ok-card'), okMeta: $('ok-meta'),
-	errType: $('err-type'), errHint: $('err-hint'), errLine: $('err-line'),
+	out: $('out'), card: $('card'), okCard: $('ok-card'), okMeta: $('ok-meta'), okTitle: $('ok-title'),
+	errType: $('err-type'), errMsg: $('err-msg'), errHint: $('err-hint'), errLine: $('err-line'),
 	explain: $('explain'), ask: $('ask'), aiMeta: $('ai-meta'), jump: $('jump'),
 	overlay: $('voice-overlay'), wave: $('wave'), voiceState: $('voice-state'),
 	empty: $('empty'), okOut: $('ok-out'),
@@ -70,17 +70,53 @@ window.monacoLoaded.then(async () => {
 	const info = await window.studio.info();
 	scratchPath = info.scratch;
 
+	// The board the code is written on: the same slate and chalk as the rest
+	// of the window (styles.css), so the editor is not a box set into the app.
 	monaco.editor.defineTheme('studio', {
 		base: 'vs-dark',
 		inherit: true,
-		rules: [],
+		rules: [
+			{ token: '', foreground: 'e8ebe3' },
+			{ token: 'comment', foreground: '7f8c85', fontStyle: 'italic' },
+			{ token: 'keyword', foreground: '8cc8e8' },
+			{ token: 'string', foreground: 'e9b97e' },
+			{ token: 'string.escape', foreground: 'f0d264' },
+			{ token: 'number', foreground: 'c9a6f0' },
+			{ token: 'delimiter', foreground: 'aab4ad' },
+			{ token: 'type', foreground: '94d8a8' },
+			{ token: 'tag', foreground: 'f0d264' },
+		],
 		colors: {
-			'editor.background': '#101014',
-			'editorGutter.background': '#101014',
-			'editorLineNumber.foreground': '#3b3b47',
-			'editorLineNumber.activeForeground': '#9a9aab',
-			'editor.lineHighlightBackground': '#16161c',
-			'editorIndentGuide.background1': '#1c1c24',
+			'editor.background': '#1a221f',
+			'editor.foreground': '#e8ebe3',
+			'editorGutter.background': '#1a221f',
+			'editorLineNumber.foreground': '#46534d',
+			'editorLineNumber.activeForeground': '#aab4ad',
+			'editor.lineHighlightBackground': '#202a26',
+			'editor.lineHighlightBorder': '#00000000',
+			'editorCursor.foreground': '#f0d264',
+			'editor.selectionBackground': '#f0d26438',
+			'editor.inactiveSelectionBackground': '#f0d26420',
+			'editorIndentGuide.background1': '#26302c',
+			'editorIndentGuide.activeBackground1': '#3a4741',
+			'editorWhitespace.foreground': '#2e3a35',
+			'editorBracketMatch.background': '#f0d2641a',
+			'editorBracketMatch.border': '#f0d26466',
+			'editorBracketHighlight.foreground1': '#f0d264',
+			'editorBracketHighlight.foreground2': '#c9a6f0',
+			'editorBracketHighlight.foreground3': '#8cc8e8',
+			'editorError.foreground': '#ff8f87',
+			'editorOverviewRuler.border': '#00000000',
+			'editorWidget.background': '#1f2824',
+			'editorWidget.border': '#3a4741',
+			'editorSuggestWidget.background': '#1f2824',
+			'editorSuggestWidget.border': '#3a4741',
+			'editorSuggestWidget.selectedBackground': '#2b3732',
+			'editorHoverWidget.background': '#1f2824',
+			'editorHoverWidget.border': '#3a4741',
+			'scrollbarSlider.background': '#ffffff14',
+			'scrollbarSlider.hoverBackground': '#ffffff22',
+			'scrollbarSlider.activeBackground': '#ffffff2e',
 		},
 	});
 
@@ -167,6 +203,7 @@ function tidy(text) {
 
 /** Redraws the output panel from the finished run, tidied. */
 function paintOutput(result) {
+	discardStream();
 	els.out.textContent = '';
 	const out = (result.stdout ?? '').trim();
 	const err = tidy(result.stderr ?? '').trim();
@@ -209,23 +246,75 @@ window.addEventListener('beforeunload', () => {
 
 // --- running ------------------------------------------------------------------
 
-window.studio.onRunData(({ bucket, text }) => {
-	const span = document.createElement('span');
-	if (bucket === 'err') {
-		span.className = 'stderr';
+/*
+ * Output as it streams, drawn in batches.
+ *
+ * Python with -u writes every print() as its own chunk, and each used to become
+ * its own span plus a scroll - which makes the browser lay the panel out again
+ * per line. A loop printing 20,000 numbers finished in 0.7s and then froze the
+ * window for minutes while the panel caught up. Now chunks are collected and
+ * drawn at most every 50ms, and only the last STREAM_KEEP characters are kept
+ * on screen while it runs; the finished run redraws the panel in full anyway.
+ */
+const STREAM_KEEP = 100_000;
+let streamQueue = [];
+let streamTimer;
+
+function flushStream() {
+	streamTimer = undefined;
+	if (!streamQueue.length) {
+		return;
 	}
-	span.textContent = text;
-	els.out.appendChild(span);
+	const frag = document.createDocumentFragment();
+	let span;
+	for (const { bucket, text } of streamQueue) {
+		// Consecutive chunks from the same stream share a span.
+		if (!span || span.dataset.bucket !== bucket) {
+			span = document.createElement('span');
+			span.dataset.bucket = bucket;
+			if (bucket === 'err') {
+				span.className = 'stderr';
+			}
+			frag.appendChild(span);
+		}
+		span.textContent += text;
+	}
+	streamQueue = [];
+	els.out.appendChild(frag);
+	while (els.out.textContent.length > STREAM_KEEP && els.out.childNodes.length > 1) {
+		els.out.firstChild.remove();
+	}
 	els.out.scrollTop = els.out.scrollHeight;
+}
+
+/** Drops anything still waiting to be drawn: a new run, or the final redraw, replaces it. */
+function discardStream() {
+	clearTimeout(streamTimer);
+	streamTimer = undefined;
+	streamQueue = [];
+}
+
+window.studio.onRunData(({ bucket, text }) => {
+	streamQueue.push({ bucket, text });
+	streamTimer ??= setTimeout(flushStream, 50);
 });
+
+/**
+ * Which run is the latest. Ctrl+Enter does not wait for the Run button to come
+ * back, so a second run can start while the first is still going - and the
+ * first one's result, arriving after, used to be painted over the second's.
+ */
+let runSeq = 0;
 
 async function run() {
 	if (!editor) {
 		return;
 	}
+	const mine = ++runSeq;
 	explaining?.stop();
 	decorations.clear();
 	traceDecorations.clear();
+	discardStream();
 	els.out.textContent = '';
 	els.card.hidden = true;
 	els.okCard.hidden = true;
@@ -242,12 +331,24 @@ async function run() {
 
 	const code = editor.getValue();
 	const result = await window.studio.run(code);
+	if (mine !== runSeq) {
+		return;
+	}
 
 	els.run.disabled = false;
 	els.stop.hidden = true;
-	els.status.textContent = `Ran in ${(result.ms / 1000).toFixed(1)}s`;
+	els.status.textContent = result.stopped
+		? `Stopped after ${(result.ms / 1000).toFixed(1)}s`
+		: `Ran in ${(result.ms / 1000).toFixed(1)}s`;
 
 	lastRun = { ...result, code };
+
+	// Stopped on purpose: nothing went wrong, and nothing ran to the end to be
+	// judged. What it printed so far is in Output; that is all there is to say.
+	if (result.stopped) {
+		paintOutput(result);
+		return;
+	}
 
 	// A missing interpreter is a setup problem, not a bug in the program. Open
 	// the checklist rather than report an error that cannot be acted on.
@@ -290,7 +391,10 @@ async function run() {
 function showError(parsed, code) {
 	els.card.hidden = false;
 	els.okCard.hidden = true;
-	els.errType.textContent = describe(parsed);
+	// The name on its own as the headline - it is what gets searched for - and
+	// Python's own message under it.
+	els.errType.textContent = parsed.type;
+	els.errMsg.textContent = parsed.message ?? '';
 	els.errHint.textContent = hintFor(parsed);
 
 	// A traceback can name a line this buffer does not have - a frame from
@@ -325,8 +429,11 @@ function showClean(result, matchedExpected) {
 	els.diffCard.hidden = true;
 
 	const printed = (result.stdout ?? '').trim();
+	// A run that hit the time limit did not run cleanly; it did not finish.
+	els.okCard.classList.toggle('stalled', Boolean(result.timedOut));
+	els.okTitle.textContent = result.timedOut ? 'Did not finish' : 'Ran cleanly';
 	if (result.timedOut) {
-		els.okMeta.textContent = 'Stopped after 15 seconds — is there a loop that never ends?';
+		els.okMeta.textContent = 'Stopped after 15 seconds. Is there a loop that never ends, or is it waiting for input()?';
 	} else if (matchedExpected) {
 		els.okMeta.textContent = `Output matches what you expected (${(result.ms / 1000).toFixed(1)}s).`;
 	} else if (printed) {
@@ -1060,6 +1167,8 @@ function paintModelLabel() {
 			: warmState === 'failed' ? ' · could not load'
 				: ai.thinks ? ' · slow, thinks first' : '';
 	els.modelLabel.textContent = ai.model ? `${ai.model}${note}` : 'no model running';
+	// The dot on the bar: ready, loading, failed, or nothing to answer with.
+	els.settingsOpen.dataset.state = !ai.model ? 'none' : (warmState ?? 'ready');
 	els.settingsOpen.title = ai.model
 		? `${PROVIDERS[ai.provider].label} · ${ai.model}  (Settings)`
 		: 'No model is running  (Settings)';

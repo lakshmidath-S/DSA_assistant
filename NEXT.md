@@ -1,6 +1,6 @@
 # Where this got to, and what is next
 
-Updated 2026-10-26. Everything described as done is on `main`.
+Updated 2026-10-31. Everything described as done is on `main`.
 
 ## The point of the app, in one paragraph
 
@@ -13,6 +13,15 @@ quieter second button.
 
 ## Done
 
+- **The chalkboard redesign.** Problem above the code, Output beside Expected
+  output under it, the right column only the tutor's. A green slate with chalk
+  colours that each mean one thing; the error's name as the card's headline; a
+  dot on the bar for whether the model is ready. System fonts only - nothing
+  downloaded or bundled. Every id the code uses was kept.
+- **A full-app script, 56 checks, all passing** (see the README), which found
+  four bugs, all fixed: `input()` hung for the whole time limit; a stopped run
+  was called clean; a run started during another could not be stopped or timed
+  out; and 20,000 printed lines took 149s to draw.
 - Run a file; mark the failing line in the editor from the real traceback.
 - Wrong answers, not just crashes: *Expected output* is checked on every run and
   a mismatch gets its own card.
@@ -85,8 +94,34 @@ quieter second button.
   17s for it. Loading it in the background once the app is idle would hide
   that, at the cost of memory nobody asked for - which is why it is not done.
 - **One file.** No open, no save-as, no tabs.
+- **An input box.** stdin is closed, so `input()` fails at once with a clear
+  note. Competitive-programming style solutions read their test case from
+  stdin; a third drawer beside Expected output, written to the process's stdin,
+  would run them as they are.
+- **Wrong-answer explanations from the 1.5B are its weakest output.** On the
+  backwards `two_sum` it has invented an IndexError. Worth trying: put the
+  first differing value of the diff, and the step where it was produced, into
+  the closing question - the same trick that fixed the crash explanations.
 
 ## Things worth not rediscovering
+
+- **Each run handles only its own process.** The timeout and a new run used to
+  call `killCurrent()`, and every run's `'close'` set `current = null`. A run
+  started while another was going was then unreachable: the old run's close
+  cleared `current`, so Stop and the 15s timeout both killed nothing and an
+  endless loop ran until the app quit. `killRun(child)` takes the process;
+  `close` clears `current` only if it is still that child. The renderer drops
+  a result from a run that has been replaced (`runSeq`).
+- **Close stdin.** Left open, `input()` waits for text that never comes, for
+  the full time limit, and is then described as a possible infinite loop.
+- **Draw streamed output in batches.** `python -u` sends every `print()` as its
+  own chunk; a span and a scroll per chunk is a layout per line, and 20,000
+  lines that ran in 0.8s took 149s to appear. Chunks are drawn every 50ms and
+  only the last 100k characters are kept while it runs.
+- **A test window is throttled unless told not to be.** Launched from a script
+  it opens behind the terminal, and Chromium throttles an occluded page's
+  timers to about one a minute. `STUDIO_SHOT` mode turns background throttling
+  off; without that, timings from a test are fiction.
 
 - **The traceback is load-bearing.** `errors.js` parses it to choose the marked
   line, and it is shown verbatim. `test/harness.test.mjs` asserts that the

@@ -122,7 +122,17 @@ function createWindow() {
 	// verify the UI without a human at the keyboard; capturePage goes through
 	// the compositor, unlike PrintWindow which comes back blank on GPU windows.
 	if (process.env.STUDIO_SHOT && !app.isPackaged) {
+		// A window launched by a script usually opens behind the terminal that
+		// launched it, and Chromium throttles an occluded page's timers to as
+		// little as once a minute - which turned a 1s wait in a test into 60s,
+		// and made every timing it reported meaningless.
+		win.webContents.setBackgroundThrottling(false);
+		if (process.env.STUDIO_SIZE) {
+			const [w, h] = process.env.STUDIO_SIZE.split('x').map(Number);
+			win.setSize(w, h);
+		}
 		win.webContents.once('did-finish-load', () => {
+			win.moveTop();
 			setTimeout(async () => {
 				// Every step here is guarded. An expression that throws in the
 				// page used to reject into nothing, which skipped the capture
@@ -253,22 +263,40 @@ app.on('before-quit', event => {
 	stopOurServers().finally(() => app.quit());
 });
 
-function killCurrent() {
-	if (current && !current.killed) {
-		try {
-			// On Windows a plain kill leaves the child's own children behind;
-			// taskkill /T takes the tree with it.
-			if (process.platform === 'win32') {
-				spawn('taskkill', ['/pid', String(current.pid), '/f', '/t']);
-			} else {
-				current.kill('SIGKILL');
-			}
-		} catch {
-			/* the process is already gone, which is what we wanted */
-		}
+/**
+ * Ends one run, by the process it was given rather than by `current`.
+ *
+ * The timeout used to call killCurrent(), and so did a new run. When a second
+ * run started before the first had exited, the first one's 'close' then set
+ * `current` to null - and from then on neither Stop nor the timeout could
+ * reach the second run, so an endless loop started that way ran for ever.
+ */
+function killRun(child) {
+	if (!child || child.killed || child.exitCode !== null) {
+		return;
 	}
+	try {
+		// On Windows a plain kill leaves the child's own children behind;
+		// taskkill /T takes the tree with it. Its 'error' needs a listener:
+		// unheard, it is thrown, and in the main process that ends the app.
+		if (process.platform === 'win32') {
+			spawn('taskkill', ['/pid', String(child.pid), '/f', '/t'], { windowsHide: true })
+				.on('error', () => child.kill());
+		} else {
+			child.kill('SIGKILL');
+		}
+	} catch {
+		/* the process is already gone, which is what we wanted */
+	}
+}
+
+function killCurrent() {
+	killRun(current);
 	current = null;
 }
+
+/** Runs ended by the Stop button, so the result can say so instead of "no errors". */
+const stoppedRuns = new WeakSet();
 
 // --- session ------------------------------------------------------------------
 // Kept deliberately small: the code, and where the caret was. No workspace, no
@@ -433,9 +461,15 @@ ipcMain.handle('run:start', async (_event, code) => {
 
 		current = child;
 
+		// Nothing will ever be typed into it. Left open, input() waited out
+		// the whole time limit and was then reported as a loop that never
+		// ends; closed, it fails at once with an EOFError on the right line.
+		child.stdin.on('error', () => { /* the program may exit before this lands */ });
+		child.stdin.end();
+
 		const timer = setTimeout(() => {
 			timedOut = true;
-			killCurrent();
+			killRun(child);
 		}, RUN_TIMEOUT_MS);
 
 		// stderr is streamed a line at a time so the harness's marker lines can
@@ -469,7 +503,9 @@ ipcMain.handle('run:start', async (_event, code) => {
 
 		child.on('error', err => {
 			clearTimeout(timer);
-			current = null;
+			if (current === child) {
+				current = null;
+			}
 			resolve({
 				ok: false,
 				stdout,
@@ -482,7 +518,11 @@ ipcMain.handle('run:start', async (_event, code) => {
 
 		child.on('close', exitCode => {
 			clearTimeout(timer);
-			current = null;
+			// Only if this is still the run in progress: a newer one may have
+			// replaced it, and must stay reachable by Stop.
+			if (current === child) {
+				current = null;
+			}
 
 			// What the variables actually held when it failed, and the path the
 			// run took. Values are absent for a clean run and for a SyntaxError;
@@ -501,12 +541,16 @@ ipcMain.handle('run:start', async (_event, code) => {
 				ms: Date.now() - started,
 				file: SCRATCH_FILE,
 				timedOut,
+				stopped: stoppedRuns.has(child),
 			});
 		});
 	});
 });
 
 ipcMain.handle('run:stop', () => {
+	if (current) {
+		stoppedRuns.add(current);
+	}
 	killCurrent();
 	return true;
 });

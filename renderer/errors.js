@@ -162,6 +162,8 @@ export function hintFor(parsed) {
 			return 'The recursion never reaches a base case.';
 		case 'ValueError':
 			return 'The value is the right type but not an acceptable value.';
+		case 'EOFError':
+			return 'The program asked for input(), and there is nowhere to type it here. Put the test values in the code instead.';
 		default:
 			return m;
 	}
