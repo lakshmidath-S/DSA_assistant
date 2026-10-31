@@ -1,12 +1,16 @@
 /*
- * Which model answers by default, and how a recorded run is put to it.
+ * Which model answers by default, that every request ends, and how a recorded
+ * run is put to the model.
  *
- * Both were got wrong once and neither is visible when it is:
+ *   pickDefaultModel once preferred a 7.6B that reasons privately for forty
+ *   seconds before writing a word. With the reasoning hidden, that looked like
+ *   the app doing nothing, and it was the main reason it felt broken. The
+ *   default is now small, coder-tuned, and never a thinking model.
  *
- *   pickDefaultModel used to consider only models with "coder" in the name, so
- *   a 1.5B coder beat a 7.6B general model sitting beside it - and the 1.5B
- *   writes the corrected code the prompt forbids. The panel still answered, so
- *   nothing looked broken.
+ *   chat() once had no timeout at all, so a question could wait for ever. The
+ *   requests below are made against a fake server that misbehaves in each of
+ *   the ways a real one does, and every one of them has to end - with the text,
+ *   or with an error that says what happened.
  *
  *   formatTrace turns the harness's changed-locals history into the lines the
  *   model reads. When the recording hit its cap the steps shown are from the
@@ -14,9 +18,10 @@
  *   program that stopped where the recording did.
  */
 import assert from 'node:assert';
+import http from 'node:http';
 import {
-	pickDefaultModel, pickDefaultServer, pickSmallestModel,
-	formatTrace, buildPrompt, buildSummaryPrompt, SYSTEM_PROMPT_SUMMARY,
+	pickDefaultModel, pickDefaultServer, modelThinks, chat, withoutCode,
+	formatTrace, buildPrompt,
 } from '../renderer/ai.js';
 
 let failed = 0;
@@ -29,53 +34,58 @@ const check = (name, fn) => {
 		failed++;
 	}
 };
+const checkAsync = async (name, fn) => {
+	try {
+		await fn();
+		console.log(`ok    ${name}`);
+	} catch (err) {
+		console.log(`FAIL  ${name}\n        ${err.message}`);
+		failed++;
+	}
+};
 
 // --- picking a model ---------------------------------------------------------
 
-// The machine this was written on, with the sizes Ollama reports for those tags.
-const INSTALLED = ['qwen2.5-coder:1.5b', 'qwen3:4b', 'logic:latest', 'qwen2.5:1.5b'];
-const SIZES = { 'qwen2.5-coder:1.5b': 1.5, 'qwen3:4b': 4, 'logic:latest': 7.6, 'qwen2.5:1.5b': 1.5 };
+// The machine this was fixed on, with what Ollama reports for each tag.
+const INSTALLED = ['qwen3:14b', 'qwen2.5-coder:1.5b', 'qwen3:4b', 'logic:latest', 'qwen2.5:1.5b'];
+const SIZES = { 'qwen3:14b': 14.8, 'qwen2.5-coder:1.5b': 1.5, 'qwen3:4b': 4, 'logic:latest': 7.6, 'qwen2.5:1.5b': 1.5 };
+const THINKING = { 'qwen3:14b': true, 'qwen2.5-coder:1.5b': false, 'qwen3:4b': true, 'logic:latest': true, 'qwen2.5:1.5b': false };
 
-check('a 7.6B beats a 1.5B coder - the case on the machine this was written on', () => {
-	assert.strictEqual(pickDefaultModel(INSTALLED, SIZES), 'logic:latest');
+check('the small non-thinking coder wins - the case on the machine this was fixed on', () => {
+	assert.strictEqual(pickDefaultModel(INSTALLED, SIZES, THINKING), 'qwen2.5-coder:1.5b');
 });
 
-// Without the server's own numbers, a custom tag has no size in it at all and
-// there is nothing to rank it by. It is still selectable in the picker.
-check('an unsized custom tag falls behind a model that spells its size out', () => {
-	assert.strictEqual(pickDefaultModel(INSTALLED), 'qwen3:4b');
-});
-
-check('the reported size wins over a misleading name', () => {
+check('a thinking model is never the default while anything else exists', () => {
 	assert.strictEqual(
-		pickDefaultModel(['tiny-name-7b', 'real:latest'], { 'tiny-name-7b': 1.5, 'real:latest': 7 }),
-		'real:latest',
+		pickDefaultModel(['logic:latest', 'llama3:8b'], { 'logic:latest': 7.6, 'llama3:8b': 8 }, { 'logic:latest': true }),
+		'llama3:8b',
 	);
 });
 
-check('coder-tuned wins among models that are big enough', () => {
-	assert.strictEqual(
-		pickDefaultModel(['llama3:8b', 'qwen2.5-coder:7b']),
-		'qwen2.5-coder:7b',
-	);
+check('the server saying "thinking" beats a name that gives nothing away', () => {
+	// logic:latest is a reasoning model under a custom tag; only the capability list knows.
+	assert.strictEqual(pickDefaultModel(['logic:latest', 'qwen2.5:1.5b'], {}, { 'logic:latest': true }), 'qwen2.5:1.5b');
 });
 
-check('largest still wins within the coders', () => {
-	assert.strictEqual(
-		pickDefaultModel(['qwen2.5-coder:3b', 'qwen2.5-coder:7b']),
-		'qwen2.5-coder:7b',
-	);
+check('with no capability list, a thinker is still recognised by its name', () => {
+	assert.strictEqual(pickDefaultModel(['qwen3:4b', 'qwen2.5-coder:7b']), 'qwen2.5-coder:7b');
+	assert.strictEqual(pickDefaultModel(['nvidia/nemotron-3-nano-4b', 'qwen2.5-coder-1.5b-instruct']), 'qwen2.5-coder-1.5b-instruct');
 });
 
-check('anything over the local ceiling is passed over', () => {
-	assert.strictEqual(
-		pickDefaultModel(['qwen2.5-coder:32b', 'qwen2.5-coder:7b']),
-		'qwen2.5-coder:7b',
-	);
+check('coder-tuned beats general at the same footing', () => {
+	assert.strictEqual(pickDefaultModel(['qwen2.5:1.5b', 'qwen2.5-coder:1.5b']), 'qwen2.5-coder:1.5b');
 });
 
-check('a small coder is still better than nothing when it is all there is', () => {
-	assert.strictEqual(pickDefaultModel(['qwen2.5-coder:1.5b']), 'qwen2.5-coder:1.5b');
+check('smaller wins among coders, because it answers', () => {
+	assert.strictEqual(pickDefaultModel(['qwen2.5-coder:7b', 'qwen2.5-coder:1.5b']), 'qwen2.5-coder:1.5b');
+});
+
+check('below 1B is passed over while something bigger exists', () => {
+	assert.strictEqual(pickDefaultModel(['qwen2.5-coder:0.5b', 'qwen2.5-coder:3b']), 'qwen2.5-coder:3b');
+});
+
+check('a thinking model is still used when it is all there is', () => {
+	assert.strictEqual(pickDefaultModel(['qwen3:4b'], {}, { 'qwen3:4b': true }), 'qwen3:4b');
 });
 
 check('embedding models are never picked', () => {
@@ -87,28 +97,41 @@ check('an unsized name is still better than a dead panel', () => {
 	assert.strictEqual(pickDefaultModel(['some-local-build']), 'some-local-build');
 });
 
-// --- picking across both servers ---------------------------------------------
-// Running LM Studio and Ollama at once is a normal setup. The panel used to
-// take whichever answered first and never look at the other, so half the
-// models were invisible and which half depended on probe order.
+check('modelThinks reads the server, then the name', () => {
+	assert.strictEqual(modelThinks({ thinking: { 'logic:latest': true } }, 'logic:latest'), true);
+	assert.strictEqual(modelThinks({ thinking: { 'qwen3:4b': false } }, 'qwen3:4b'), false);
+	assert.strictEqual(modelThinks(undefined, 'qwen3:4b'), true);
+	assert.strictEqual(modelThinks(undefined, 'qwen2.5-coder:1.5b'), false);
+});
 
-check('the best model wins even when it is on the second server', () => {
+// --- picking across both servers ---------------------------------------------
+
+check('the better model wins even when it is on the second server', () => {
 	assert.deepStrictEqual(
 		pickDefaultServer([
-			{ provider: 'lmstudio', models: ['qwen2.5-coder:1.5b'], sizes: {} },
-			{ provider: 'ollama', models: ['qwen2.5-coder:7b'], sizes: {} },
+			{ provider: 'lmstudio', models: ['nvidia/nemotron-3-nano-4b'], sizes: {} },
+			{ provider: 'ollama', models: ['qwen2.5-coder:1.5b'], sizes: {} },
 		]),
-		{ provider: 'ollama', model: 'qwen2.5-coder:7b' },
+		{ provider: 'ollama', model: 'qwen2.5-coder:1.5b' },
 	);
 });
 
-check('a size reported by one server counts for the choice', () => {
+check('capabilities reported by one server count for the choice', () => {
 	assert.deepStrictEqual(
 		pickDefaultServer([
-			{ provider: 'lmstudio', models: ['some-1.5b-thing'], sizes: {} },
-			{ provider: 'ollama', models: ['logic:latest'], sizes: { 'logic:latest': 7.6 } },
+			{ provider: 'ollama', models: ['logic:latest', 'qwen2.5:1.5b'], sizes: {}, thinking: { 'logic:latest': true } },
 		]),
-		{ provider: 'ollama', model: 'logic:latest' },
+		{ provider: 'ollama', model: 'qwen2.5:1.5b' },
+	);
+});
+
+check('on a tie Ollama wins, because only Ollama can be warmed up', () => {
+	assert.deepStrictEqual(
+		pickDefaultServer([
+			{ provider: 'lmstudio', models: ['qwen2.5-coder:1.5b'], sizes: {} },
+			{ provider: 'ollama', models: ['qwen2.5-coder:1.5b'], sizes: {} },
+		]),
+		{ provider: 'ollama', model: 'qwen2.5-coder:1.5b' },
 	);
 });
 
@@ -122,82 +145,187 @@ check('a server that is up but empty is skipped, not chosen', () => {
 	);
 });
 
-check('the same model on both servers resolves to one of them', () => {
-	assert.deepStrictEqual(
-		pickDefaultServer([
-			{ provider: 'lmstudio', models: ['qwen2.5-coder:7b'], sizes: {} },
-			{ provider: 'ollama', models: ['qwen2.5-coder:7b'], sizes: {} },
-		]),
-		{ provider: 'lmstudio', model: 'qwen2.5-coder:7b' },
-	);
-});
-
 check('nothing running, nothing chosen', () => {
 	assert.strictEqual(pickDefaultServer([]), undefined);
 	assert.strictEqual(pickDefaultServer(undefined), undefined);
 	assert.strictEqual(pickDefaultServer([{ provider: 'ollama', models: [], sizes: {} }]), undefined);
 });
 
-// --- compressing the conversation --------------------------------------------
-// Turns past the window used to be dropped. They are summarised now, by the
-// cheapest model on the server already running - this is bookkeeping, and it
-// must not cost the price of an answer.
+// --- every request ends --------------------------------------------------------
+// A fake Ollama that misbehaves in each of the ways a real one does. Limits are
+// shrunk so the test takes seconds; the logic is the same at full size.
 
-check('the smallest model is chosen for the bookkeeping', () => {
-	assert.strictEqual(
-		pickSmallestModel(['qwen2.5-coder:7b', 'qwen2.5-coder:1.5b', 'qwen3:4b']),
-		'qwen2.5-coder:1.5b',
-	);
+const LIMITS = { loadMs: 600, stallMs: 600, totalMs: 3000 };
+const frame = obj => `${JSON.stringify(obj)}\n`;
+
+/** Starts a server whose /api/chat does whatever `behave(res)` does. */
+function fake(behave) {
+	return new Promise(resolve => {
+		const server = http.createServer((req, res) => {
+			req.resume();
+			behave(res);
+		});
+		server.listen(0, '127.0.0.1', () => {
+			resolve({ server, endpoint: `http://127.0.0.1:${server.address().port}` });
+		});
+	});
+}
+
+async function ask(behave, extra = {}) {
+	const { server, endpoint } = await fake(behave);
+	const phases = [];
+	try {
+		const result = await chat({
+			provider: 'ollama', model: 'test-model', endpoint,
+			messages: [{ role: 'user', content: 'hi' }],
+			limits: LIMITS,
+			onStatus: phase => phases.push(phase),
+			...extra,
+		});
+		return { result, phases };
+	} catch (err) {
+		return { err, phases };
+	} finally {
+		server.closeAllConnections?.();
+		server.close();
+	}
+}
+
+await checkAsync('a normal stream returns the text', async () => {
+	const { result, err } = await ask(res => {
+		res.write(frame({ message: { content: 'O(n)' } }));
+		res.end(frame({ message: { content: ' time.' }, done: true, done_reason: 'stop' }));
+	});
+	assert.ifError(err);
+	assert.strictEqual(result.text, 'O(n) time.');
+	assert.strictEqual(result.truncated, false);
 });
 
-check('a reported size beats the name here too', () => {
-	assert.strictEqual(
-		pickSmallestModel(['looks-7b', 'real:latest'], { 'looks-7b': 7, 'real:latest': 1.5 }),
-		'real:latest',
-	);
+await checkAsync('nothing listening is reported as not running, at once', async () => {
+	const t0 = Date.now();
+	const err = await chat({
+		provider: 'ollama', model: 'm', endpoint: 'http://127.0.0.1:9',
+		messages: [], limits: LIMITS,
+	}).then(() => undefined, e => e);
+	assert.strictEqual(err?.kind, 'offline');
+	assert.ok(Date.now() - t0 < 2000, 'took too long to notice nothing was there');
 });
 
-check('embedding models are not summarisers', () => {
-	assert.strictEqual(pickSmallestModel(['nomic-embed-text-1.5b', 'qwen3:4b']), 'qwen3:4b');
+await checkAsync('a server that never replies times out, it does not wait for ever', async () => {
+	const { err, phases } = await ask(() => { /* accept, then say nothing */ });
+	assert.strictEqual(err?.kind, 'timeout');
+	assert.match(err.message, /No reply from test-model/);
+	assert.ok(phases.includes('waiting'), 'never reported that it was waiting');
 });
 
-check('nothing sized, nothing chosen - the caller falls back', () => {
-	assert.strictEqual(pickSmallestModel(['some-local-build']), undefined);
-	assert.strictEqual(pickSmallestModel([]), undefined);
+await checkAsync('a stream that stops part-way times out as stalled', async () => {
+	const { err } = await ask(res => {
+		res.write(frame({ message: { content: 'Starting to' } }));
+		/* and then nothing */
+	});
+	assert.strictEqual(err?.kind, 'timeout');
+	assert.match(err.message, /stopped responding part-way/);
 });
 
-check('the summariser is told to add nothing of its own', () => {
-	assert.match(SYSTEM_PROMPT_SUMMARY, /Do NOT add anything that is not in the notes/);
-	assert.match(SYSTEM_PROMPT_SUMMARY, /leave it out rather than guessing/);
-	// It must be forbidden from producing code or corrections: the real
-	// artifacts cover those, and they are sent in full on every request.
-	assert.match(SYSTEM_PROMPT_SUMMARY, /No advice, no/);
-	assert.match(SYSTEM_PROMPT_SUMMARY, /no code, no speculation/);
+await checkAsync('reasoning with no answer after it is an error, not a blank', async () => {
+	const { err, phases } = await ask(res => {
+		res.write(frame({ message: { thinking: 'let me think about this...' } }));
+		res.end(frame({ message: { content: '' }, done: true }));
+	});
+	assert.strictEqual(err?.kind, 'empty');
+	assert.ok(phases.includes('thinking'), 'never reported that it was thinking');
 });
 
-check('the first fold has no previous notes to rewrite', () => {
-	const prompt = buildSummaryPrompt('', [
-		{ role: 'user', content: 'why is this O(n squared)?' },
-		{ role: 'assistant', content: 'the inner loop runs n - i times.' },
-	]);
-	assert.doesNotMatch(prompt, /THE NOTES SO FAR/);
-	assert.match(prompt, /They asked: why is this O\(n squared\)\?/);
-	assert.match(prompt, /The tutor answered: the inner loop runs n - i times\./);
-	assert.match(prompt, /Write the notes/);
+await checkAsync('an answer written entirely inside <think> tags counts as empty', async () => {
+	const { err } = await ask(res => {
+		res.end(frame({ message: { content: '<think>hmm</think>' }, done: true }));
+	});
+	assert.strictEqual(err?.kind, 'empty');
 });
 
-check('later folds carry the notes forward instead of starting again', () => {
-	const prompt = buildSummaryPrompt('They established the loop is O(n squared).', [
-		{ role: 'user', content: 'what about space?' },
-	]);
-	assert.match(prompt, /THE NOTES SO FAR:/);
-	assert.match(prompt, /They established the loop is O\(n squared\)\./);
-	assert.match(prompt, /Rewrite the notes/);
+await checkAsync('a model that is not installed says so', async () => {
+	const { err } = await ask(res => {
+		res.writeHead(404, { 'Content-Type': 'application/json' });
+		res.end(JSON.stringify({ error: "model 'test-model' not found" }));
+	});
+	assert.strictEqual(err?.kind, 'missing');
+	assert.match(err.message, /test-model is not installed/);
 });
 
-check('a runaway turn is truncated, not sent whole', () => {
-	const prompt = buildSummaryPrompt('', [{ role: 'user', content: 'x'.repeat(5000) }]);
-	assert.ok(prompt.length < 2000, `summary prompt was ${prompt.length} chars`);
+await checkAsync('an error inside the stream surfaces, with its message', async () => {
+	const { err } = await ask(res => {
+		res.end(frame({ error: 'out of memory' }));
+	});
+	assert.strictEqual(err?.kind, 'server');
+	assert.match(err.message, /out of memory/);
+});
+
+await checkAsync('hitting the length limit is reported, not hidden', async () => {
+	const { result } = await ask(res => {
+		res.end(frame({ message: { content: 'a long answer' }, done: true, done_reason: 'length' }));
+	});
+	assert.strictEqual(result.truncated, true);
+});
+
+await checkAsync('the caller can stop a request, and it ends as stopped', async () => {
+	const ctrl = new AbortController();
+	setTimeout(() => ctrl.abort(), 150);
+	const { err } = await ask(() => { /* say nothing */ }, { signal: ctrl.signal });
+	assert.strictEqual(err?.kind, 'stopped');
+});
+
+await checkAsync('a thinking model is asked not to think; others are not sent the flag', async () => {
+	const seen = [];
+	const { server, endpoint } = await fake(() => { });
+	server.removeAllListeners('request');
+	server.on('request', (req, res) => {
+		let body = '';
+		req.on('data', c => { body += c; });
+		req.on('end', () => {
+			seen.push(JSON.parse(body));
+			res.end(frame({ message: { content: 'ok' }, done: true }));
+		});
+	});
+	try {
+		for (const thinks of [true, false]) {
+			await chat({ provider: 'ollama', model: 'm', endpoint, messages: [], limits: LIMITS, thinks });
+		}
+	} finally {
+		server.close();
+	}
+	assert.strictEqual(seen[0].think, false);
+	assert.ok(!('think' in seen[1]), 'sent think to a model that does not think');
+	assert.strictEqual(seen[1].keep_alive, '30m');
+	assert.ok(seen[1].options.num_predict > 0, 'no cap on the answer length');
+});
+
+// --- the teaching answer never shows code ------------------------------------
+// The 1.5B default writes a corrected line in a code block about a third of the
+// time even when told not to, so the automatic explanation removes it.
+
+const NOTE = /A code fix was left out here - press Show the fix/;
+
+check('a code block is replaced by a pointer to Show the fix', () => {
+	const t = withoutCode('It goes one too far.\n\n```python\nfor i in range(3):\n```\n\nWhat is len(xs)?');
+	assert.doesNotMatch(t, /```|range\(3\)/);
+	assert.match(t, NOTE);
+	assert.match(t, /It goes one too far\./);
+	assert.match(t, /What is len\(xs\)\?$/);
+});
+
+check('a block still streaming in is removed from its fence on', () => {
+	const t = withoutCode('Here is how:\n```py\nfor i in rang');
+	assert.doesNotMatch(t, /```|rang/);
+	assert.match(t, NOTE);
+});
+
+check('an answer with no code comes through untouched', () => {
+	assert.strictEqual(withoutCode('No code here. What is the base case?'), 'No code here. What is the base case?');
+	assert.strictEqual(withoutCode(undefined), '');
+});
+
+check('inline code is explanation, not a fix, and is kept', () => {
+	assert.strictEqual(withoutCode('Line 3 reads `xs[3]`.'), 'Line 3 reads `xs[3]`.');
 });
 
 // --- putting a run to it ------------------------------------------------------

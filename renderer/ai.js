@@ -44,118 +44,153 @@ export function stripReasoning(text) {
 }
 
 /**
- * Below this, a model cannot hold the teaching rules.
+ * Names that mark a model as one that reasons privately before answering.
  *
- * Measured, not assumed. Asked to explain the two_sum that returns its indices
- * in discovery order, qwen2.5-coder:1.5b answered in 3.5s and again in 9.3s
- * with the recorded trace - and both times wrote out a corrected line under a
- * "Here's the corrected line:" heading, which is the one thing SYSTEM_PROMPT
- * forbids, and both times blamed the wrong line. A 7.6B on the same prompt
- * named line 6, explained the ordering assumption, and closed with a question,
- * in 51-74s. Slow and right beats instant and confidently wrong: being handed a
- * fix you did not ask for defeats the point of the app, and being handed the
- * wrong one wastes the session.
- *
- * The 1.5B stays selectable in the picker - it is genuinely quicker, and for
- * "what does this error mean" that can be the better trade. It is just not the
- * default.
+ * Only a fallback. Ollama reports this outright - `capabilities` includes
+ * "thinking" - and that is what listModels uses. LM Studio's listing carries an
+ * id and nothing else, so for its models the name is all there is.
  */
-const MIN_TEACHING_B = 3;
+const THINKER_NAME = /qwen3|deepseek-r1|-r1\b|qwq|nemotron|nanbeige|magistral|reason|think|gpt-oss/i;
 
-/** Above this, a laptop GPU starts swapping and the wait stops being worth it. */
-const MAX_LOCAL_B = 8;
-
-/**
- * Prefer a coder-tuned model, largest that is still sane on a small GPU - but
- * never one so small it argues with its own instructions.
- */
-export function pickDefaultModel(models, sizes = {}) {
-	const fromName = id => {
-		const m = /(\d+(?:\.\d+)?)\s*b\b/i.exec(id);
-		return m ? Number(m[1]) : undefined;
-	};
-
-	const usable = models
-		.filter(m => !/embed/i.test(m))
-		// What the server says it is, and only then what the name suggests.
-		.map(model => ({ model, b: sizes[model] ?? fromName(model), coder: /coder|code/i.test(model) }));
-
-	// Coder-tuned first, then largest - but only among models big enough to be
-	// worth defaulting to. A 1.5B coder used to win here purely by being the
-	// only name with "coder" in it, beating a 7.6B sitting right beside it.
-	const candidates = usable
-		.filter(c => c.b !== undefined && c.b >= MIN_TEACHING_B && c.b <= MAX_LOCAL_B)
-		.sort((a, b) => Number(b.coder) - Number(a.coder) || b.b - a.b);
-
-	// Nothing in range: take a coder of any size, then anything at all. Some
-	// model is better than a dead panel, and the picker can correct it.
-	return candidates[0]?.model
-		?? usable.find(c => c.coder)?.model
-		?? usable[0]?.model;
+/** A size in billions read out of a model name, e.g. "qwen2.5-coder:1.5b" -> 1.5. */
+function sizeFromName(id) {
+	const m = /(\d+(?:\.\d+)?)\s*b\b/i.exec(id ?? '');
+	return m ? Number(m[1]) : undefined;
 }
 
 /**
- * The same choice, made across every server that answered.
+ * The model to answer with when nobody has chosen one.
  *
- * Both can be running at once, and the better model is not always on the one
- * that replied first. Returns which server owns the winner, because that is
- * what a request has to be addressed to.
+ * Small, coder-tuned, and above all not a model that thinks before it writes.
+ * Measured on the machine this was built for (RTX 3050, 4 GB), asking the same
+ * complexity question through the app's own prompt:
+ *
+ *   qwen2.5-coder:1.5b   1.4s warm, first word at 0.5s, answer correct
+ *   qwen3:4b            30s warm, first word at 24s
+ *   logic:latest (7.6B)  58s warm, first word at 43s, answered a different question
+ *
+ * The two slow ones spend most of that time reasoning privately, and with the
+ * reasoning hidden that looked exactly like nothing happening - which is how
+ * this app came to feel broken. An earlier version defaulted to the 7.6B on the
+ * grounds that its answers were more careful. They were, when they arrived. A
+ * model that answers every time beats one that seems not to work; Settings is
+ * there for anyone with the hardware and the patience for more.
+ *
+ * Ranking, in order: does not think, is coder-tuned, is at least 1B (anything
+ * smaller struggles to follow the prompt at all), then smallest.
+ */
+export function pickDefaultModel(models, sizes = {}, thinking = {}) {
+	const usable = (models ?? [])
+		.filter(m => !/embed/i.test(m))
+		.map(model => {
+			const b = sizes[model] ?? sizeFromName(model);
+			return {
+				model,
+				thinks: thinking[model] ?? THINKER_NAME.test(model),
+				coder: /coder|code/i.test(model),
+				tiny: b !== undefined && b < 1,
+				// Unknown sizes sort after every known one: a guess should not
+				// beat a model we can measure.
+				b: b ?? Number.POSITIVE_INFINITY,
+			};
+		});
+
+	usable.sort((x, y) =>
+		Number(x.thinks) - Number(y.thinks)
+		|| Number(y.coder) - Number(x.coder)
+		|| Number(x.tiny) - Number(y.tiny)
+		|| x.b - y.b);
+
+	return usable[0]?.model;
+}
+
+/**
+ * The same choice, made across every server that answered. Returns which
+ * server owns the winner, because that is what a request is addressed to.
  */
 export function pickDefaultServer(servers) {
-	const stocked = (servers ?? []).filter(s => s.models?.length);
+	// On a tie Ollama wins: it can be told to load the model before the first
+	// question and keep it loaded, and LM Studio cannot - its first answer
+	// always pays the load. The sort below is stable, so order is the tiebreak.
+	const stocked = (servers ?? [])
+		.filter(s => s.models?.length)
+		.sort((a, b) => Number(b.provider === 'ollama') - Number(a.provider === 'ollama'));
 	if (!stocked.length) {
 		return undefined;
 	}
 
 	const names = [];
 	const sizes = {};
+	const thinking = {};
 	for (const server of stocked) {
 		for (const name of server.models) {
 			names.push(name);
-			// First server to state a size for a name wins; the same model
-			// pulled into both servers is the same model either way.
 			if (!(name in sizes) && server.sizes?.[name] !== undefined) {
 				sizes[name] = server.sizes[name];
+			}
+			if (!(name in thinking) && server.thinking?.[name] !== undefined) {
+				thinking[name] = server.thinking[name];
 			}
 		}
 	}
 
-	const model = pickDefaultModel(names, sizes);
+	const model = pickDefaultModel(names, sizes, thinking);
 	if (!model) {
 		return undefined;
 	}
 	return { provider: stocked.find(s => s.models.includes(model)).provider, model };
 }
 
+/** Whether a model reasons privately before answering, by what the server said or its name. */
+export function modelThinks(server, model) {
+	return server?.thinking?.[model] ?? THINKER_NAME.test(model ?? '');
+}
+
 /**
- * The installed models, as `{ name, params }`.
+ * The installed models, as `{ name, params, thinks }`.
  *
- * `params` is the size in billions where the server will say - Ollama reports
- * it as "7.6B" in the tag details - and undefined otherwise. It matters because
- * a name is not a reliable size: a model pulled under a custom tag carries no
- * number at all, and picking a default by reading the name would rank a 7.6B
- * called `logic:latest` below a 1.5B that spells its size out.
+ * `params` is the size in billions where the server says so, otherwise
+ * undefined. `thinks` comes from Ollama's own capability list, one /api/show per
+ * model, asked in parallel and each given a short deadline: a model whose
+ * details cannot be read is reported anyway, falling back to its name.
  */
 export async function listModels(provider) {
-	const billions = text => {
-		const m = /(\d+(?:\.\d+)?)\s*b\b/i.exec(text ?? '');
-		return m ? Number(m[1]) : undefined;
-	};
-
 	const { endpoint } = PROVIDERS[provider];
+	const quick = ms => AbortSignal.timeout(ms);
+
 	if (provider === 'ollama') {
-		const res = await fetch(`${endpoint}/api/tags`);
+		const res = await fetch(`${endpoint}/api/tags`, { signal: quick(4000) });
 		const json = await res.json();
-		return (json.models ?? []).map(m => ({
-			name: m.name,
-			params: billions(m.details?.parameter_size),
+		const models = json.models ?? [];
+
+		return Promise.all(models.map(async m => {
+			let thinks;
+			try {
+				const show = await fetch(`${endpoint}/api/show`, {
+					method: 'POST',
+					signal: quick(4000),
+					body: JSON.stringify({ model: m.name }),
+				}).then(r => r.json());
+				thinks = Array.isArray(show.capabilities) ? show.capabilities.includes('thinking') : undefined;
+			} catch {
+				thinks = undefined;
+			}
+			return {
+				name: m.name,
+				params: sizeFromName(m.details?.parameter_size),
+				thinks: thinks ?? THINKER_NAME.test(m.name),
+			};
 		}));
 	}
 
 	// LM Studio's OpenAI-compatible listing carries an id and nothing else.
-	const res = await fetch(`${endpoint}/v1/models`);
+	const res = await fetch(`${endpoint}/v1/models`, { signal: quick(4000) });
 	const json = await res.json();
-	return (json.data ?? []).map(m => ({ name: m.id, params: undefined }));
+	return (json.data ?? []).map(m => ({
+		name: m.id,
+		params: sizeFromName(m.id),
+		thinks: THINKER_NAME.test(m.id),
+	}));
 }
 
 /*
@@ -163,33 +198,74 @@ export async function listModels(provider) {
  *
  * The point of this app is to get better at DSA, not to receive working
  * solutions faster. Handing over a corrected line removes the one part that
- * actually builds skill - working out why your own reasoning was wrong - and a
- * model will do exactly that unless told not to, because "give the minimal fix"
- * is what these prompts usually ask for.
+ * actually builds skill - working out why your own reasoning was wrong.
  *
- * So: explain the mistake, never write the fix. The escape hatch is explicit
- * (SYSTEM_PROMPT_REVEAL, behind a button) rather than being the default, so
- * seeing the answer stays a decision instead of a habit.
+ * It is short, and it comes with one worked example, because the default model
+ * is a 1.5B and a 1.5B follows short concrete instructions and copies examples;
+ * a long list of rules it mostly ignores. Measured on three common crashes,
+ * three answers each: the longer rule list this replaced gave away the fix in
+ * 9 of 9 and never ended with a question. This shape, with the rules repeated
+ * at the very end of the request, cut that to 4 of 9. The rest is enforced
+ * mechanically - see withoutCode() - because "usually" is not good enough for
+ * the one thing the app exists to do.
  */
 export const SYSTEM_PROMPT = [
-	'You are a tutor sitting next to someone learning data structures and algorithms.',
+	'You are a tutor for a student learning data structures and algorithms.',
+	'Explain their bug so they can fix it themselves.',
+	'Never write code. Never show a corrected line.',
+	'Reply in at most 4 sentences, then ask the student one question.',
+].join(NL);
+
+/** One worked exchange, on a different bug, so the model sees the shape of a good answer. */
+export const TEACHING_EXAMPLE = [
+	{
+		role: 'user',
+		content: [
+			'PYTHON REPORTED THIS ERROR:',
+			'```',
+			'Traceback (most recent call last):',
+			'  File "main.py", line 3, in <module>',
+			'    print(nums[len(nums)])',
+			'IndexError: list index out of range',
+			'```',
+			'THE FAILING LINE IS 3.',
+			'What is going wrong here, and why?',
+		].join(NL),
+	},
+	{
+		role: 'assistant',
+		content: 'Line 3 asks for `nums[len(nums)]`. A list of length 4 has positions 0 to 3, '
+			+ 'so `len(nums)` is one past the last position, and there is nothing there to read. '
+			+ 'The idea that does not hold is that the length is also a valid index. '
+			+ 'What is the largest index this list actually has?',
+	},
+];
+
+/** Repeated at the very end of the request, where a small model reads hardest. */
+export const TEACHING_RULES = [
 	'',
-	'Your job is to make them understand their own mistake so they can fix it',
-	'themselves. You are NOT here to hand them a working solution.',
 	'',
-	'You are given either the exact traceback Python produced, or the expected and',
-	'actual output of a run. Work only from that. Never claim a different failure,',
-	'and do not go looking for other problems.',
-	'',
-	'Rules:',
-	'- Say what is happening in plain language, and name the line it happens on.',
-	'- Explain WHY the code does that: the assumption or idea that does not hold.',
-	'  This is the part that matters - spend most of your words here.',
-	'- NEVER write the corrected code. No fixed line, no rewritten function, no',
-	'  "change X to Y", not even as an example. Describe the problem, not the edit.',
-	'- Finish with one specific question that points them at the fix.',
-	'- Under 120 words. No preamble, no praise, no restating the question.',
-].join('\n');
+	'Reply rules: explain the mistake in plain words, at most 4 sentences.',
+	'Do NOT write any code or a corrected line.',
+	'Your LAST sentence must be one question for the student.',
+].join(NL);
+
+/**
+ * Takes fenced code out of a teaching answer.
+ *
+ * The model is told not to write the fix, and a 1.5B often does anyway - a
+ * corrected line in a code block is the commonest way. Removing the block, and
+ * saying where it went, keeps the explanation and keeps the answer behind
+ * "Show the fix" where it was meant to be. An unclosed fence - an answer still
+ * streaming, or cut short - is removed from the fence to the end.
+ */
+export function withoutCode(text) {
+	const NOTE = '(A code fix was left out here - press Show the fix if you want to see it.)';
+	return String(text ?? '')
+		.replace(/```[^\n]*\n[\s\S]*?```/g, NOTE)
+		.replace(/```[\s\S]*$/, NOTE)
+		.trim();
+}
 
 /**
  * Used only when the reader presses "Show the fix". Kept deliberately separate
@@ -447,63 +523,208 @@ export function buildPrompt({ code, parsed, stdout, expected, values, trace, pro
 	return parts.join('\n');
 }
 
-/**
- * Streams a completion, calling onToken with each fragment.
- * Returns the full text.
+/*
+ * Request limits.
+ *
+ * The version before these had no timeout of any kind. A model still loading,
+ * one swapping out for another, or one reasoning privately for a minute all
+ * looked identical from the outside - a caret that never moved - so a question
+ * could sit there forever and nobody could tell whether anything was working.
+ * Now every request ends: with an answer, or with a message saying why not.
  */
-export async function chat({ provider, model, messages, signal }, onToken) {
-	const { endpoint } = PROVIDERS[provider];
-	const isOllama = provider === 'ollama';
 
-	const res = await fetch(
-		isOllama ? `${endpoint}/api/chat` : `${endpoint}/v1/chat/completions`,
-		{
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			signal,
-			body: JSON.stringify(
-				isOllama
-					? { model, messages, stream: true, options: { temperature: 0.2 } }
-					: { model, messages, stream: true, temperature: 0.2 },
-			),
-		},
-	);
+/** Nothing back at all. Generous, because loading a large model from disk is slow. */
+const LOAD_TIMEOUT_MS = 120_000;
 
-	if (!res.ok) {
-		const body = await res.text().catch(() => '');
-		throw new Error(`${PROVIDERS[provider].label} returned ${res.status}: ${body.slice(0, 300)}`);
+/** A gap between chunks once the model has started. A healthy stream never pauses this long. */
+const STALL_TIMEOUT_MS = 45_000;
+
+/** The whole answer, however it is going. */
+const TOTAL_TIMEOUT_MS = 180_000;
+
+/**
+ * Long enough for any explanation the prompts ask for; short enough that a
+ * rambling model stops. 450 cut one optimisation answer in three off mid-
+ * sentence on a 1.5B, which ignores the word limits it is given; 600 costs at
+ * most about nine seconds on a laptop GPU.
+ */
+export const MAX_ANSWER_TOKENS = 600;
+
+/** Keep the model loaded between questions, so the second one does not pay to load it again. */
+const KEEP_ALIVE = '30m';
+
+/**
+ * Ollama's options, shared by real requests and the warm-up. They must match:
+ * Ollama reloads a model whose context size changes between requests, so a
+ * warm-up with different options would load it twice.
+ *
+ * 4096 tokens of context covers every request the app builds - a long
+ * solution, the trace, two earlier turns and the answer. 8192 doubled the
+ * memory each model needs for nothing: with it, a 4B on a 4 GB card got
+ * 2.3 GB of its 4.1 onto the GPU and ran the rest on the CPU.
+ */
+const OLLAMA_OPTIONS = { temperature: 0.2, num_ctx: 4096 };
+
+/** A failed request, with a message a person can act on and a kind the UI can branch on. */
+export class AiError extends Error {
+	/**
+	 * @param {'offline'|'missing'|'timeout'|'server'|'empty'|'stopped'} kind
+	 * @param {string} message
+	 */
+	constructor(kind, message) {
+		super(message);
+		this.name = 'AiError';
+		this.kind = kind;
 	}
+}
 
-	const reader = res.body.getReader();
-	const decoder = new TextDecoder();
-	let buffer = '';
-	let full = '';
+function endedBy(why, label, model, started) {
+	const s = Math.round((Date.now() - started) / 1000);
+	switch (why) {
+		case 'stopped':
+			return new AiError('stopped', 'Stopped.');
+		case 'load':
+			return new AiError('timeout', `No reply from ${model} after ${s}s. It may be too large for this machine - pick a smaller model in Settings.`);
+		case 'stall':
+			return new AiError('timeout', `${model} stopped responding part-way through, after ${s}s.`);
+		default:
+			return new AiError('timeout', `Gave up after ${s}s - ${model} was taking too long. A smaller model in Settings will be quicker.`);
+	}
+}
 
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) {
-			break;
+/**
+ * One model request, with a guaranteed end.
+ *
+ * Resolves with the full text, or rejects with an AiError. Never neither.
+ *
+ * onStatus(phase, elapsedMs) reports where it has got to, and is called again
+ * once a second while nothing visible is arriving, so the UI can count:
+ *   'waiting'  - sent, nothing back yet (usually the model is being loaded)
+ *   'thinking' - reasoning arriving, no visible answer yet
+ *   'writing'  - the answer itself is arriving
+ *
+ * `thinks` should be true for a model that reasons before answering; for Ollama
+ * that sends think:false, which most such models honour. Some do not - a
+ * DeepSeek-R1 distill reasons regardless - and for those 'thinking' is at least
+ * reported as it happens rather than shown as a dead caret.
+ *
+ * @returns {Promise<{ text: string, truncated: boolean }>}
+ */
+export async function chat({
+	provider, model, messages, signal,
+	onToken = () => { }, onStatus = () => { },
+	thinks = false, maxTokens = MAX_ANSWER_TOKENS,
+	// Overridable so the tests can prove each limit fires without waiting minutes.
+	limits = {}, endpoint: endpointOverride,
+}) {
+	const { label } = PROVIDERS[provider];
+	const endpoint = endpointOverride ?? PROVIDERS[provider].endpoint;
+	const {
+		loadMs = LOAD_TIMEOUT_MS, stallMs = STALL_TIMEOUT_MS, totalMs = TOTAL_TIMEOUT_MS,
+	} = limits;
+	const isOllama = provider === 'ollama';
+	const started = Date.now();
+
+	// Our own controller: a timeout and the caller's Stop both end the fetch,
+	// and `why` records which, because by the time the rejection arrives the
+	// two look the same.
+	const ctrl = new AbortController();
+	let why;
+	const end = reason => {
+		if (!why) {
+			why = reason;
+			ctrl.abort();
 		}
-		buffer += decoder.decode(value, { stream: true });
+	};
+	if (signal?.aborted) {
+		end('stopped');
+	}
+	signal?.addEventListener('abort', () => end('stopped'), { once: true });
 
-		// Both providers are line-delimited; keep the partial tail for next time.
-		const lines = buffer.split('\n');
-		buffer = lines.pop() ?? '';
+	let phase = 'waiting';
+	let lastChunk = started;
+	const setPhase = next => {
+		if (next !== phase) {
+			phase = next;
+			onStatus(phase, Date.now() - started);
+		}
+	};
+	onStatus(phase, 0);
 
-		for (const line of lines) {
+	// Checked four times a second so a limit fires close to when it should;
+	// the status is re-reported only when the visible second changes.
+	let shownSecond = 0;
+	const ticker = setInterval(() => {
+		const now = Date.now();
+		if (now - started > totalMs) {
+			end('total');
+		} else if (phase === 'waiting' && now - started > loadMs) {
+			end('load');
+		} else if (phase !== 'waiting' && now - lastChunk > stallMs) {
+			end('stall');
+		}
+		const second = Math.floor((now - started) / 1000);
+		if (phase !== 'writing' && second !== shownSecond) {
+			shownSecond = second;
+			onStatus(phase, now - started);
+		}
+	}, 250);
+
+	let full = '';
+	let truncated = false;
+
+	try {
+		const body = isOllama
+			? {
+				model, messages, stream: true, keep_alive: KEEP_ALIVE,
+				options: { ...OLLAMA_OPTIONS, num_predict: maxTokens },
+				...(thinks ? { think: false } : {}),
+			}
+			: { model, messages, stream: true, temperature: 0.2, max_tokens: maxTokens };
+
+		let res;
+		try {
+			res = await fetch(isOllama ? `${endpoint}/api/chat` : `${endpoint}/v1/chat/completions`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				signal: ctrl.signal,
+				body: JSON.stringify(body),
+			});
+		} catch {
+			if (why) {
+				throw endedBy(why, label, model, started);
+			}
+			// Connection refused comes back in milliseconds, so this is honest:
+			// nothing is listening.
+			throw new AiError('offline', `${label} is not running.`);
+		}
+
+		if (!res.ok) {
+			const detail = await res.text().catch(() => '');
+			if (res.status === 404 || /not found/i.test(detail)) {
+				throw new AiError('missing', `${model} is not installed in ${label}.`);
+			}
+			throw new AiError('server', `${label} returned ${res.status}: ${detail.slice(0, 200)}`);
+		}
+
+		const reader = res.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = '';
+
+		const take = line => {
 			const trimmed = line.trim();
 			if (!trimmed) {
-				continue;
+				return false;
 			}
 
 			let payload = trimmed;
 			if (!isOllama) {
 				if (!trimmed.startsWith('data:')) {
-					continue;
+					return false;
 				}
 				payload = trimmed.slice('data:'.length).trim();
 				if (payload === '[DONE]') {
-					return full;
+					return true;
 				}
 			}
 
@@ -511,21 +732,99 @@ export async function chat({ provider, model, messages, signal }, onToken) {
 			try {
 				chunk = JSON.parse(payload);
 			} catch {
-				continue; // a malformed frame should not kill the stream
+				return false; // a malformed frame should not end the stream
 			}
 
-			const token = isOllama
-				? chunk.message?.content
-				: chunk.choices?.[0]?.delta?.content;
+			if (chunk.error) {
+				const message = typeof chunk.error === 'string' ? chunk.error : chunk.error.message;
+				throw new AiError('server', `${label}: ${message ?? 'unknown error'}`);
+			}
 
-			if (token) {
-				full += token;
-				onToken(token);
+			const reasoning = isOllama ? chunk.message?.thinking : chunk.choices?.[0]?.delta?.reasoning_content;
+			const content = isOllama ? chunk.message?.content : chunk.choices?.[0]?.delta?.content;
+			const finish = isOllama ? chunk.done_reason : chunk.choices?.[0]?.finish_reason;
+			if (finish === 'length') {
+				truncated = true;
+			}
+
+			if (reasoning) {
+				setPhase(phase === 'writing' ? 'writing' : 'thinking');
+			}
+			if (content) {
+				full += content;
+				// A model that writes its reasoning inline in <think> tags is
+				// still thinking until something outside them appears.
+				setPhase(stripReasoning(full) ? 'writing' : 'thinking');
+				onToken(content);
+			}
+			return isOllama && chunk.done === true;
+		};
+
+		let finished = false;
+		while (!finished) {
+			const { done, value } = await reader.read();
+			if (done) {
+				break;
+			}
+			lastChunk = Date.now();
+			buffer += decoder.decode(value, { stream: true });
+			const lines = buffer.split(NL);
+			buffer = lines.pop() ?? '';
+			for (const line of lines) {
+				if (take(line)) {
+					finished = true;
+					break;
+				}
 			}
 		}
-	}
+		if (!finished && buffer) {
+			take(buffer);
+		}
 
-	return full;
+		if (!stripReasoning(full)) {
+			throw new AiError('empty', `${model} finished without writing an answer. Try again, or pick a different model in Settings.`);
+		}
+		return { text: full, truncated };
+	} catch (err) {
+		if (err instanceof AiError) {
+			throw err;
+		}
+		if (why) {
+			throw endedBy(why, label, model, started);
+		}
+		throw new AiError('server', `Lost the connection to ${label}: ${err.message}`);
+	} finally {
+		clearInterval(ticker);
+	}
+}
+
+/**
+ * Loads a model ahead of the first question, and keeps it loaded.
+ *
+ * Without this the first answer of a session pays the load - about 6s for a
+ * 1.5B, 17s for a 7.6B on the machine this was measured on - while showing
+ * nothing. Ollama only: LM Studio loads on first request and has no equivalent
+ * call. Resolves true once the model is in memory, false if it could not be
+ * loaded; never throws.
+ */
+export async function warmModel(provider, model) {
+	if (provider !== 'ollama') {
+		return true;
+	}
+	try {
+		const res = await fetch(`${PROVIDERS.ollama.endpoint}/api/generate`, {
+			method: 'POST',
+			signal: AbortSignal.timeout(LOAD_TIMEOUT_MS),
+			// No prompt: Ollama loads the model and returns, which is the point.
+			body: JSON.stringify({ model, keep_alive: KEEP_ALIVE, options: OLLAMA_OPTIONS }),
+		});
+		// Read it through: the reply is written once loading has finished, and
+		// "the model is ready" is the whole thing being waited for.
+		await res.text();
+		return res.ok;
+	} catch {
+		return false;
+	}
 }
 
 /*
@@ -586,78 +885,7 @@ export const SYSTEM_PROMPT_OPTIMISE = [
 	'- Under 140 words. No preamble.',
 ].join('\n');
 
-/**
- * Picks the cheapest model on a server, for work that is not the answer.
- *
- * Summarising old turns is bookkeeping, not teaching: it has to be fast and it
- * has to be faithful, and a 1.5B is fine at copying facts from text in front of
- * it. It is only trusted with the things it cannot get wrong - which is why the
- * summary never reaches the reader and never replaces the code, the traceback
- * or the trace, all of which are sent in full every time regardless.
- */
-export function pickSmallestModel(models, sizes = {}) {
-	const fromName = id => {
-		const m = /(\d+(?:\.\d+)?)\s*b\b/i.exec(id);
-		return m ? Number(m[1]) : undefined;
-	};
-
-	const sized = models
-		.filter(m => !/embed/i.test(m))
-		.map(model => ({ model, b: sizes[model] ?? fromName(model) }))
-		.filter(c => c.b !== undefined)
-		.sort((a, b) => a.b - b.b);
-
-	return sized[0]?.model;
-}
-
-/*
- * Compressing the conversation.
- *
- * Only the last few turns are sent - a small model has little context to spare,
- * and old turns crowd out the code. Everything past that used to be dropped, so
- * a question about something worked out ten turns ago had nothing behind it.
- *
- * The rule that matters: this summarises the CONVERSATION, never the code or
- * the run. Those are facts the app holds exactly and sends in full each time.
- * Handing a model its own paraphrase of a traceback instead of the traceback is
- * how you manufacture a hallucination, so the summary is confined to what was
- * asked and what was concluded.
- */
-export const SYSTEM_PROMPT_SUMMARY = [
-	'You keep notes on a conversation between a tutor and someone learning data',
-	'structures and algorithms. You are not part of that conversation.',
-	'',
-	'Rules:',
-	'- Write a compact factual record of what was asked and what was concluded.',
-	'- Keep the specifics a later question might refer back to: the bug that was',
-	'  found, the complexity that was established, the approach that was ruled out.',
-	'- Keep their own words for anything they claimed or decided.',
-	'- Do NOT add anything that is not in the notes you were given. No advice, no',
-	'  corrections, no code, no speculation about what they meant.',
-	'- If something is unclear, leave it out rather than guessing at it.',
-	'- Under 120 words, plain sentences, no headings.',
-].join('\n');
-
 /** The old summary plus the turns now falling out of the window. */
-export function buildSummaryPrompt(previous, messages) {
-	const parts = [];
-
-	if (previous && previous.trim()) {
-		parts.push('THE NOTES SO FAR:', previous.trim(), '');
-	}
-
-	parts.push('NEWLY OLD TURNS, oldest first:');
-	for (const message of messages) {
-		const who = message.role === 'user' ? 'They asked' : 'The tutor answered';
-		parts.push(`${who}: ${String(message.content ?? '').slice(0, 1200)}`, '');
-	}
-
-	parts.push(previous && previous.trim()
-		? 'Rewrite the notes so they cover the turns above as well. Keep it under 120 words.'
-		: 'Write the notes. Keep them under 120 words.');
-
-	return parts.join('\n');
-}
 /**
  * A follow-up question, optionally about a selected fragment.
  *

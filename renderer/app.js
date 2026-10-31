@@ -14,7 +14,7 @@ import {
 	PROVIDERS, pickDefaultServer, buildPrompt, chat, stripReasoning,
 	SYSTEM_PROMPT, SYSTEM_PROMPT_REVEAL, SYSTEM_PROMPT_ASK,
 	SYSTEM_PROMPT_COMPLEXITY, SYSTEM_PROMPT_OPTIMISE, buildAskPrompt,
-	SYSTEM_PROMPT_SUMMARY, buildSummaryPrompt, pickSmallestModel,
+	warmModel, modelThinks, TEACHING_EXAMPLE, TEACHING_RULES, withoutCode,
 } from './ai.js';
 import { Voice } from './voice.js';
 import { render, escapeHtml } from './markdown.js';
@@ -60,8 +60,9 @@ let decorations;
 let traceDecorations;
 let scratchPath = '';
 let lastRun;
-let aiAbort;
-const ai = { provider: undefined, model: undefined };
+/** The explanation of the last run, while it arrives - a new run stops it. */
+let explaining;
+const ai = { provider: undefined, model: undefined, thinks: false };
 
 // --- editor -------------------------------------------------------------------
 
@@ -222,7 +223,7 @@ async function run() {
 	if (!editor) {
 		return;
 	}
-	aiAbort?.abort();
+	explaining?.stop();
 	decorations.clear();
 	traceDecorations.clear();
 	els.out.textContent = '';
@@ -279,9 +280,7 @@ async function run() {
 	if (expected && expected !== got) {
 		lastRun.expected = expected;
 		showDiff(expected, got);
-		if (ai.provider) {
-			explain(undefined, 'diff');
-		}
+		explain(undefined, 'diff');
 		return;
 	}
 
@@ -314,10 +313,9 @@ function showError(parsed, code) {
 	showValues(lastRun.values);
 
 	// Arrives on its own. The old build made you ask, which is what made it feel
-	// like a chat window rather than part of the editor.
-	if (ai.provider) {
-		explain();
-	}
+	// like a chat window rather than part of the editor. With no model it still
+	// runs, and says in the card that nothing can answer yet.
+	explain();
 }
 
 function showClean(result, matchedExpected) {
@@ -416,66 +414,201 @@ els.jump.addEventListener('click', () => {
 // --- the model ----------------------------------------------------------------
 
 /**
+ * What the status line under an answer says while it is on its way.
+ *
+ * Seconds are counted on purpose. A number going up is the difference between
+ * "working, slowly" and "broken", and the app used to show neither - just a
+ * caret, for as long as the request took, which with no timeout could be for
+ * ever.
+ */
+function phaseText(phase, ms, model) {
+	const s = Math.round(ms / 1000);
+	switch (phase) {
+		case 'waiting':
+			return s < 2 ? `Asking ${model}…` : `Waiting for ${model}… ${s}s (loading it, usually)`;
+		case 'thinking':
+			return `${model} is thinking before it answers… ${s}s`;
+		default:
+			return 'Writing…';
+	}
+}
+
+/** Puts a status line into its busy, done or failed look. */
+function setStatus(status, state, text = '') {
+	status.textContent = text;
+	status.classList.toggle('is-busy', state === 'busy');
+	status.classList.toggle('is-error', state === 'error');
+}
+
+/** Says why an answer did not arrive, and offers the next thing to try. */
+function paintFailure(box, status, err, retry) {
+	box.innerHTML = `<p class="ai-error">${escapeHtml(err?.message ?? String(err))}</p>`;
+	setStatus(status, 'error');
+	if (retry) {
+		status.append(button('Try again', retry));
+	}
+	if (err?.kind === 'offline') {
+		status.append(button('Start it', () => startAndRetry(retry)));
+	} else if (err?.kind === 'missing' || err?.kind === 'timeout' || err?.kind === 'empty') {
+		status.append(button('Choose a model', openSettings));
+	}
+}
+
+/** No model at all: say so where the answer would have been, rather than nothing. */
+function paintNoModel(box, status, retry) {
+	box.innerHTML = '<p class="ai-error">No model is running, so there is nothing to answer this yet.</p>';
+	setStatus(status, 'error');
+	status.append(button('Start it', () => startAndRetry(retry)));
+	status.append(button('Settings', openSettings));
+}
+
+/**
+ * Starts the model server the answer was meant for, then tries again.
+ *
+ * Only that one. Starting every installed server and then waiting for all of
+ * them to answer cost the full 25-second wait whenever one was slow to come up
+ * - measured with LM Studio on the machine this was fixed on, where recovering
+ * from a dead Ollama took 36s of which the answer itself was 8.
+ */
+async function startAndRetry(retry) {
+	const installed = await window.studio.probe().catch(() => ({}));
+	const wanted = ai.provider ? [ai.provider]
+		: installed.ollamaPath ? ['ollama']
+			: undefined;
+	els.status.textContent = 'Starting the model server…';
+	try {
+		const res = await window.studio.startServers(wanted);
+		if (res?.starting?.length) {
+			await waitForProviders(res.starting, 25000);
+		}
+	} catch {
+		/* the retry reports whatever is still wrong */
+	}
+	els.status.textContent = '';
+	await refreshSetup();
+	retry?.();
+}
+
+/** Which request currently owns each answer box, so a superseded one cannot paint over it. */
+const boxOwner = new WeakMap();
+
+/**
+ * Streams one answer into `box`, and keeps `status` honest about it.
+ *
+ * Every model request in the app goes through here, so they all behave alike,
+ * and every one ends visibly: with the answer and how long it took, or with
+ * what went wrong and something to press. Each request has its own controller.
+ * There used to be one shared between everything, so asking a question
+ * silently cancelled the explanation still arriving, and pressing Run
+ * cancelled the question.
+ *
+ * @param {{ retry?: () => void, clean?: (text: string) => string }} [opts]
+ *        `retry` is what "Try again" does; `clean` turns the model's text into
+ *        what is shown, and defaults to removing any private reasoning.
+ * @returns {{ done: Promise<string|undefined>, stop: () => void }}
+ *          `done` resolves with the visible answer, or undefined if there was none.
+ */
+function answerInto(box, status, messages, { retry, clean = stripReasoning } = {}) {
+	const ctrl = new AbortController();
+	const { provider, model, thinks } = ai;
+	boxOwner.set(box, ctrl);
+	const mine = () => boxOwner.get(box) === ctrl;
+
+	const done = (async () => {
+		if (!provider) {
+			paintNoModel(box, status, retry);
+			return undefined;
+		}
+
+		box.innerHTML = '<span class="caret"></span>';
+		const started = Date.now();
+		let text = '';
+		try {
+			const { text: full, truncated } = await chat({
+				provider, model, thinks, messages,
+				signal: ctrl.signal,
+				onStatus: (phase, ms) => {
+					if (mine()) {
+						setStatus(status, 'busy', phaseText(phase, ms, model));
+					}
+				},
+				onToken: token => {
+					text += token;
+					const visible = clean(text);
+					if (visible && mine()) {
+						box.innerHTML = render(visible) + '<span class="caret"></span>';
+					}
+				},
+			});
+
+			const answer = clean(full);
+			if (mine()) {
+				box.innerHTML = render(answer);
+				const secs = ((Date.now() - started) / 1000).toFixed(1);
+				setStatus(status, 'done', `${model} · ${secs}s${truncated ? ' · cut short at the length limit' : ''}`);
+			}
+			// An answer is proof the model is loaded, whatever the header last said.
+			if (ai.provider === provider && ai.model === model && warmState !== 'ready') {
+				warmState = 'ready';
+				paintModelLabel();
+			}
+			return answer;
+		} catch (err) {
+			// A request replaced by a newer one says nothing: the newer one owns
+			// the box now, and "Stopped." over its answer would be a lie.
+			if (err?.kind !== 'stopped' && mine()) {
+				paintFailure(box, status, err, retry);
+			}
+			return undefined;
+		}
+	})();
+
+	return { done, stop: () => ctrl.abort() };
+}
+
+/**
+ * Explains the last run: the crash, or the wrong answer.
+ *
  * @param {string} [question] Free text, e.g. something said out loud.
  * @param {'error'|'diff'} [target] Which card the answer belongs in.
  * @param {boolean} [reveal] Show the fix outright, rather than teaching.
  */
 async function explain(question, target = 'error', reveal = false) {
-	if (!ai.provider || !lastRun) {
-		return;
+	if (!lastRun) {
+		return undefined;
 	}
-	aiAbort?.abort();
-	aiAbort = new AbortController();
+	// One explanation at a time: a new one replaces whatever was still arriving.
+	explaining?.stop();
 
 	const out = target === 'diff' ? els.diffExplain : els.explain;
 	const meta = target === 'diff' ? els.diffMeta : els.aiMeta;
-	const askBtn = target === 'diff' ? els.diffAsk : els.ask;
-	const revealBtn = target === 'diff' ? els.diffReveal : els.reveal;
 
-	out.innerHTML = '<span class="caret"></span>';
-	askBtn.disabled = true;
-	revealBtn.disabled = true;
-	const started = Date.now();
-	let text = '';
+	const messages = [
+		{ role: 'system', content: reveal ? SYSTEM_PROMPT_REVEAL : SYSTEM_PROMPT },
+		// One worked example, for teaching only: a small model copies its shape.
+		...(reveal ? [] : TEACHING_EXAMPLE),
+		{
+			role: 'user',
+			content: buildPrompt({
+				code: lastRun.code,
+				parsed: lastRun.parsed,
+				stdout: lastRun.stdout,
+				expected: lastRun.expected,
+				values: lastRun.values,
+				trace: lastRun.trace,
+				problem: els.problem.value,
+				question,
+			}) + (reveal ? '' : TEACHING_RULES),
+		},
+	];
 
-	try {
-		await chat({
-			provider: ai.provider,
-			model: ai.model,
-			signal: aiAbort.signal,
-			messages: [
-				{ role: 'system', content: reveal ? SYSTEM_PROMPT_REVEAL : SYSTEM_PROMPT },
-				{
-					role: 'user',
-					content: buildPrompt({
-						code: lastRun.code,
-						parsed: lastRun.parsed,
-						stdout: lastRun.stdout,
-						expected: lastRun.expected,
-						values: lastRun.values,
-						trace: lastRun.trace,
-						problem: els.problem.value,
-						question,
-					}),
-				},
-			],
-		}, token => {
-			text += token;
-			out.innerHTML = render(stripReasoning(text)) + '<span class="caret"></span>';
-			out.scrollTop = out.scrollHeight;
-		});
-
-		out.innerHTML = render(stripReasoning(text));
-		meta.textContent = `${ai.model} · ${((Date.now() - started) / 1000).toFixed(1)}s`;
-	} catch (err) {
-		if (err.name !== 'AbortError') {
-			out.innerHTML = `<p style="color:var(--bad)">${escapeHtml(err.message)}</p>`;
-		}
-	} finally {
-		askBtn.disabled = false;
-		revealBtn.disabled = false;
-	}
-	return text;
+	explaining = answerInto(out, meta, messages, {
+		retry: () => explain(question, target, reveal),
+		// The teaching answer never shows code, whatever the model wrote;
+		// "Show the fix" is where the fix lives.
+		clean: reveal ? stripReasoning : text => withoutCode(stripReasoning(text)),
+	});
+	return explaining.done;
 }
 
 els.ask.addEventListener('click', () => explain());
@@ -768,25 +901,25 @@ async function doRefreshSetup() {
 		? remembered
 		: pickDefaultServer(servers);
 
-	if (choice) {
-		ai.provider = choice.provider;
-		ai.model = choice.model;
-		paintModelLabel();
-		els.ask.disabled = false;
-		els.diffAsk.disabled = false;
-		els.reveal.disabled = false;
-		els.diffReveal.disabled = false;
-		setAskEnabled(true);
-	} else {
-		ai.provider = undefined;
-		ai.model = undefined;
-		paintModelLabel();
-		els.ask.disabled = true;
-		els.diffAsk.disabled = true;
-		els.reveal.disabled = true;
-		els.diffReveal.disabled = true;
-		setAskEnabled(false);
+	const changed = choice?.provider !== ai.provider || choice?.model !== ai.model;
+	ai.provider = choice?.provider;
+	ai.model = choice?.model;
+	ai.thinks = choice ? modelThinks(servers.find(s => s.provider === choice.provider), choice.model) : false;
+	// A warm-up that failed - usually because the server went away mid-load -
+	// is tried again whenever the setup is re-checked, or the header would say
+	// "could not load" long after the model was answering again.
+	if (changed || warmState === 'failed') {
+		warmUp();
 	}
+	paintModelLabel();
+
+	// Never disabled for want of a model. Pressing one with nothing running
+	// says so, in place; a greyed-out button said nothing at all.
+	els.ask.disabled = false;
+	els.diffAsk.disabled = false;
+	els.reveal.disabled = false;
+	els.diffReveal.disabled = false;
+	setAskEnabled(true);
 
 	renderSetup(setupState);
 
@@ -824,6 +957,7 @@ async function doRefreshSetup() {
  * the remembered choice for every run after.
  */
 async function bootModels() {
+	forgetOldPicks();
 	const remembered = readModelChoice();
 
 	els.status.textContent = remembered
@@ -831,7 +965,14 @@ async function bootModels() {
 		: 'Looking for a model…';
 
 	try {
-		const only = remembered ? [remembered.provider] : undefined;
+		// With nothing chosen, Ollama alone when it is installed: the default
+		// model lives there, it is the server that can load a model ahead of the
+		// first question, and starting LM Studio too on every launch cost memory
+		// for a choice nobody had made. LM Studio is one press away in Settings.
+		const installed = await window.studio.probe().catch(() => ({}));
+		const only = remembered ? [remembered.provider]
+			: installed.ollamaPath ? ['ollama']
+				: undefined;
 		const res = await window.studio.startServers(only);
 		if (res?.starting?.length) {
 			await waitForProviders(res.starting, 25000);
@@ -844,11 +985,9 @@ async function bootModels() {
 	els.status.textContent = '';
 	await refreshSetup();
 
-	// First run: whatever we picked is now the remembered choice, so the next
-	// launch starts one server instead of all of them.
-	if (!remembered && ai.provider && ai.model) {
-		rememberModelChoice(ai.provider, ai.model);
-	}
+	// The automatic default is deliberately NOT saved as a pick. It used to
+	// be, so a slow model chosen by the old rule stuck for good, and a better
+	// default could never reach anyone who had launched the app once.
 }
 function readSetting(key) {
 	try {
@@ -889,11 +1028,64 @@ function rememberModelChoice(provider, model) {
 }
 
 /** The bar shows what is answering; everything about changing it is in Settings. */
+/** Whether the chosen model is in memory yet: 'loading', 'ready', 'failed', or undefined. */
+let warmState;
+
+/**
+ * Loads the chosen model now, rather than at the first question, and says so
+ * in the header while it happens. The first answer of a session used to pay
+ * the whole load - seconds for a small model, the better part of a minute for
+ * a large one - with nothing on screen to say so.
+ */
+async function warmUp() {
+	const { provider, model } = ai;
+	if (!provider || !model) {
+		warmState = undefined;
+		paintModelLabel();
+		return;
+	}
+	warmState = 'loading';
+	paintModelLabel();
+	const ok = await warmModel(provider, model);
+	// Someone may have picked another model while this one loaded.
+	if (ai.provider === provider && ai.model === model) {
+		warmState = ok ? 'ready' : 'failed';
+		paintModelLabel();
+	}
+}
+
 function paintModelLabel() {
-	els.modelLabel.textContent = ai.model ?? 'no model yet';
+	const note = !ai.model ? ''
+		: warmState === 'loading' ? ' · loading…'
+			: warmState === 'failed' ? ' · could not load'
+				: ai.thinks ? ' · slow, thinks first' : '';
+	els.modelLabel.textContent = ai.model ? `${ai.model}${note}` : 'no model running';
 	els.settingsOpen.title = ai.model
 		? `${PROVIDERS[ai.provider].label} · ${ai.model}  (Settings)`
 		: 'No model is running  (Settings)';
+}
+
+/**
+ * Model picks saved before this version are forgotten, once.
+ *
+ * They were made while the app gave no sign of whether anything was working.
+ * The stored history on the machine this was fixed on shows eight models tried
+ * in turn, a 27B among them; and the first run used to save its own automatic
+ * default as if it had been chosen - a 7.6B that thinks for forty seconds
+ * before writing a word. Keeping any of that would carry the original failure
+ * straight past the fix. Picks made from here on are kept.
+ */
+const PICK_VERSION = '2';
+
+function forgetOldPicks() {
+	try {
+		if (localStorage.getItem('modelPickVersion') !== PICK_VERSION) {
+			localStorage.removeItem('model');
+			localStorage.setItem('modelPickVersion', PICK_VERSION);
+		}
+	} catch {
+		/* storage unavailable: nothing was remembered to forget */
+	}
 }
 
 /**
@@ -942,6 +1134,12 @@ function renderSettings() {
 				const row = document.createElement('button');
 				row.className = 'model-row';
 				row.textContent = model;
+				if (modelThinks(server, model)) {
+					const tag = document.createElement('span');
+					tag.className = 'model-tag';
+					tag.textContent = 'thinks first · slow';
+					row.appendChild(tag);
+				}
 				if (provider === ai.provider && model === ai.model) {
 					row.classList.add('chosen');
 				}
@@ -984,7 +1182,9 @@ function renderSettings() {
 function chooseModel(provider, model) {
 	ai.provider = provider;
 	ai.model = model;
+	ai.thinks = modelThinks((setupState?.servers ?? []).find(s => s.provider === provider), model);
 	rememberModelChoice(provider, model);
+	warmUp();
 	paintModelLabel();
 	renderSettings();
 }
@@ -1280,75 +1480,7 @@ els.diffAsk.addEventListener('click', () => explain(undefined, 'diff'));
  * turns crowd out the code.
  */
 const history = [];
-const HISTORY_TURNS = 3;
-
-/**
- * Everything older than the window, folded into a few lines.
- *
- * Turns past the window used to be dropped, so a question about something
- * worked out ten turns ago had nothing behind it. They are summarised instead,
- * by the smallest model on the server already running - this is bookkeeping,
- * not teaching, and it should not cost twenty seconds or a second server.
- *
- * What it summarises is only ever the CONVERSATION. The code, the traceback,
- * the recorded values and the trace are facts the app holds exactly and sends
- * in full on every request; replacing any of those with a small model's
- * paraphrase is how a hallucination gets manufactured.
- */
-let historySummary = '';
-let summarising = false;
-
-/** The summary as a message, or nothing when there is no history behind us. */
-function summaryMessages() {
-	return historySummary
-		? [{ role: 'system', content: `EARLIER IN THIS CONVERSATION, in note form:\n${historySummary}` }]
-		: [];
-}
-
-/**
- * Folds the turns that have fallen out of the window into the summary.
- *
- * Runs after an answer, never in front of one: the reader is not kept waiting
- * for bookkeeping. If it fails the raw turns stay where they are - an
- * uncompressed history is only wasteful, whereas a dropped one loses the
- * thread.
- */
-async function compressHistory() {
-	const excess = history.length - HISTORY_TURNS * 2;
-	if (summarising || excess <= 0 || !ai.provider) {
-		return;
-	}
-
-	const older = history.slice(0, excess);
-	summarising = true;
-
-	try {
-		// The smallest model on the server we are already talking to. Starting
-		// the other one to save a few tokens would be a poor trade.
-		const server = (setupState?.servers ?? []).find(s => s.provider === ai.provider);
-		const model = pickSmallestModel(server?.models ?? [], server?.sizes ?? {}) ?? ai.model;
-
-		const text = await chat({
-			provider: ai.provider,
-			model,
-			messages: [
-				{ role: 'system', content: SYSTEM_PROMPT_SUMMARY },
-				{ role: 'user', content: buildSummaryPrompt(historySummary, older) },
-			],
-		}, () => { });
-
-		const clean = stripReasoning(text).trim();
-		if (clean) {
-			historySummary = clean.slice(0, 1200);
-			history.splice(0, excess);
-			saveThread();
-		}
-	} catch {
-		/* keep the raw turns; they are still sent, just not compressed */
-	} finally {
-		summarising = false;
-	}
-}
+const HISTORY_TURNS = 2;
 
 /** What is selected right now, in the editor or in an answer. */
 let selection = '';
@@ -1407,7 +1539,6 @@ const turns = [];
 function saveThread() {
 	try {
 		localStorage.setItem(THREAD_KEY, JSON.stringify({
-			summary: historySummary,
 			turns: turns.slice(-THREAD_MAX),
 		}));
 	} catch {
@@ -1427,9 +1558,6 @@ function restoreThread() {
 	const saved = Array.isArray(stored) ? stored : stored?.turns;
 	if (!Array.isArray(saved)) {
 		return;
-	}
-	if (typeof stored?.summary === 'string') {
-		historySummary = stored.summary;
 	}
 
 	for (const turn of saved.slice(-THREAD_MAX)) {
@@ -1484,78 +1612,53 @@ function setAskEnabled(on) {
 /**
  * Answers a follow-up. `mode` picks the system prompt; the question text is
  * what appears above the answer.
+ *
+ * The question always lands in the thread, even when nothing can answer it. It
+ * used to vanish - the box cleared, and nothing shown - whenever no model was
+ * running, which is exactly when someone most needs to be told why.
  */
-async function ask(question, mode = 'ask') {
-	if (!ai.provider || !editor) {
-		return;
+async function ask(question, mode = 'ask', scope = selection) {
+	if (!editor) {
+		return undefined;
 	}
 
-	const scope = selection;
 	const { answer, meta } = addTurn(question, scope);
-	setAskEnabled(false);
-	aiAbort?.abort();
-	aiAbort = new AbortController();
-
 	const system = mode === 'complexity' ? SYSTEM_PROMPT_COMPLEXITY
 		: mode === 'optimise' ? SYSTEM_PROMPT_OPTIMISE
 			: SYSTEM_PROMPT_ASK;
 
-	const started = Date.now();
-	let text = '';
+	const messages = [
+		{ role: 'system', content: system },
+		// Earlier turns, so a bare "why?" still has a subject.
+		...history.slice(-HISTORY_TURNS * 2),
+		{
+			role: 'user',
+			content: buildAskPrompt({
+				code: editor.getValue(),
+				selection: scope,
+				question,
+				parsed: lastRun?.parsed,
+				expected: lastRun?.expected,
+				stdout: lastRun?.stdout,
+				values: lastRun?.values,
+				trace: lastRun?.trace,
+				problem: els.problem.value,
+			}),
+		},
+	];
 
-	try {
-		await chat({
-			provider: ai.provider,
-			model: ai.model,
-			signal: aiAbort.signal,
-			messages: [
-				{ role: 'system', content: system },
-				// Everything before the window, in note form.
-				...summaryMessages(),
-				// Earlier turns, so a bare "why?" still has a subject.
-				...history.slice(-HISTORY_TURNS * 2),
-				{
-					role: 'user',
-					content: buildAskPrompt({
-						code: editor.getValue(),
-						selection: scope,
-						question,
-						parsed: lastRun?.parsed,
-						expected: lastRun?.expected,
-						stdout: lastRun?.stdout,
-						values: lastRun?.values,
-						trace: lastRun?.trace,
-						problem: els.problem.value,
-					}),
-				},
-			],
-		}, token => {
-			text += token;
-			answer.innerHTML = render(stripReasoning(text)) + '<span class="caret"></span>';
-		});
+	const retry = () => {
+		answer.closest('.qa')?.remove();
+		ask(question, mode, scope);
+	};
 
-		const clean = stripReasoning(text);
-		answer.innerHTML = render(clean);
-		meta.textContent = `${ai.model} · ${((Date.now() - started) / 1000).toFixed(1)}s`;
-
+	const clean = await answerInto(answer, meta, messages, { retry }).done;
+	if (clean) {
 		history.push({ role: 'user', content: question }, { role: 'assistant', content: clean });
 		turns.push({ q: question, scope, a: clean, meta: meta.textContent });
 		saveThread();
-
-		// Deliberately not awaited: the answer is already rendered, and folding
-		// the turns that just fell out of the window is nobody's business but
-		// the next question's.
-		compressHistory();
-		return clean;
-	} catch (err) {
-		if (err.name === 'AbortError') {
-			answer.innerHTML = '<p>Cancelled.</p>';
-		} else {
-			answer.innerHTML = `<p style="color:var(--bad)">${escapeHtml(err.message)}</p>`;
-		}
-	} finally {
-		setAskEnabled(true);
 	}
+	return clean;
 }
 
 function submitAsk() {
@@ -1587,7 +1690,6 @@ els.threadClear.addEventListener('click', () => {
 	els.thread.textContent = '';
 	history.length = 0;
 	turns.length = 0;
-	historySummary = '';
 	saveThread();
 });
 

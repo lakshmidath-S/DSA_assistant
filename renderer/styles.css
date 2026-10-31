@@ -1244,3 +1244,33 @@ kbd {
 	font-size: 11px;
 	color: var(--text-dim);
 }
+
+/* --- the state of an answer ------------------------------------------------
+ * Under every answer while it is on its way, and after it ends. Busy is the
+ * accent colour with a count of seconds; failed is red with something to press.
+ * The point is that "slow" and "broken" no longer look the same.
+ */
+.meta.is-busy,
+.qa-meta.is-busy {
+	color: var(--accent);
+}
+
+.meta.is-error,
+.qa-meta.is-error {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	color: var(--bad);
+}
+
+.ai-error {
+	margin: 0;
+	color: var(--bad);
+}
+
+.model-tag {
+	margin-left: 8px;
+	font-size: 10.5px;
+	color: var(--text-faint);
+}

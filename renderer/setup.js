@@ -92,6 +92,9 @@ export async function probe() {
 				sizes: Object.fromEntries(
 					found.filter(m => m.params !== undefined).map(m => [m.name, m.params]),
 				),
+				// Which models reason privately before answering. They are never
+				// the default, and when chosen anyway they are asked not to.
+				thinking: Object.fromEntries(found.map(m => [m.name, Boolean(m.thinks)])),
 			};
 		} catch {
 			return undefined; // not up

@@ -35,6 +35,7 @@ const NODE = {
 	__dirname: 'readonly', __filename: 'readonly',
 	setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly',
 	clearInterval: 'readonly', URL: 'readonly', fetch: 'readonly',
+	AbortController: 'readonly', AbortSignal: 'readonly',
 };
 
 /** The findings worth failing a build over. */

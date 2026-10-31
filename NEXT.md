@@ -1,6 +1,6 @@
 # Where this got to, and what is next
 
-Updated 2026-09-06. Everything described as done is on `main`.
+Updated 2026-10-26. Everything described as done is on `main`.
 
 ## The point of the app, in one paragraph
 
@@ -18,13 +18,19 @@ quieter second button.
   a mismatch gets its own card.
 - Explanations arrive unprompted, teach rather than answer, and never write the
   corrected code unless *Show the fix* is pressed.
-- Follow-up questions with memory of the last three turns; select code or answer
+- Follow-up questions with memory of the last two turns; select code or answer
   text to scope a question to it. **The thread now survives a restart.**
 - **Time & space** and **Can it be faster?** as dedicated buttons.
 - Settings: the checklist and the model list, with the active model on the bar.
   The last-used server starts itself on launch and stops on quit.
-- Conversation older than the three-turn window is summarised rather than
-  dropped, by the cheapest model on the server already running.
+- **Every request ends.** `chat()` has load, stall and total timeouts, an
+  output cap, and a live status line under each answer; a failure says why
+  and offers **Try again** / **Start it** / **Choose a model**. A question with
+  no model running still lands in the thread, with the reason. Each request
+  has its own controller. The model is loaded at launch and kept loaded.
+- **The default is the small non-thinking coder** (`qwen2.5-coder:1.5b`), not
+  the 7.6B - see the trap below. Its teaching answers have code blocks removed
+  mechanically (`withoutCode`), since it will not hold the rule on its own.
 - Setup checklist: finds Python, starts every model server it finds that is
   installed but stopped - Ollama and LM Studio, from one **Start models**
   button - stops again on quit whatever it started, and downloads a model with
@@ -116,12 +122,24 @@ quieter second button.
   wording makes the whole view read as off by one.
 - **Compare traced values by repr.** `graph[u].append(v)` mutates in place, so
   the object is the one it always was and identity sees nothing happen.
-- **A 1.5B will not hold the no-fix rule.** `qwen2.5-coder:1.5b` answers in
-  3.5s, and writes out the corrected line under a heading, with or without the
-  trace, while blaming the wrong line. The 7.6B takes 51–74s and gets it right.
-  `pickDefaultModel` therefore refuses anything under 3B while something larger
-  is installed — it used to do the opposite, because it looked only at names
-  containing "coder".
+- **A model that thinks looks like a broken app.** The 7.6B default
+  (`logic:latest`, a DeepSeek-R1 distill) reasons privately for ~43s before its
+  first visible word, and the app hides reasoning - so, with no timeout on the
+  request, questions sat under a blinking caret and the user could not tell
+  slow from dead. It also ignores `think: false`. Ollama lists `thinking` in
+  `capabilities`; use that, never the name, and never default to one.
+- **A 1.5B will not hold the no-fix rule, and that is now handled in code.**
+  `qwen2.5-coder:1.5b` wrote corrected code in 9/9 crash explanations under the
+  long rule list. A short system prompt, one worked example and the rules
+  repeated at the end of the request got it to 4/12; `withoutCode()` takes it
+  to 0/12 shown. It still rarely ends with a question, and without recorded
+  values it can name the wrong cause - with them it was right 3/3.
+- **Only a 1.5B fits a 4 GB GPU.** At `num_ctx` 8192 a 4B got 2.3 of 4.1 GB
+  onto the GPU; the context is 4096 now, which every request fits in.
+- **Never run two models back to back on a small card.** The background
+  history summary used the smallest model while answers used the default, so
+  every question after the third could unload one and reload the other. It
+  was removed rather than fixed.
 - **Model sizes come from the server, not the name.** A model pulled under a
   custom tag (`logic:latest`) has no number in its name; Ollama reports
   `parameter_size` per tag and `probe()` passes it through.
@@ -154,12 +172,9 @@ quieter second button.
   handler returns, so an async shutdown has to `preventDefault()`, do the work,
   and call `app.quit()` again - with a timeout, so a server that will not die
   cannot trap the app open.
-- **Summarise the conversation, never the artifacts.** The code, the
-  traceback, the recorded values and the trace are things the app holds exactly
-  and sends in full on every request. Replacing any of them with a small
-  model's paraphrase is how a hallucination gets manufactured, so the
-  summariser only ever sees past questions and answers - and is told to add
-  nothing, and to leave out what it is unsure of.
+- **Send the artifacts in full, every time.** The code, the traceback, the
+  recorded values and the trace are things the app holds exactly. Replacing
+  any of them with a model's paraphrase is how a hallucination gets made.
 - **A wait with no counter reads as a crash.** The first `/stt` of a session
   loads Whisper: 17.2s measured with the model cached, minutes without. The old
   UI showed a fixed "Transcribing..." for all of it. `/health` answers during a

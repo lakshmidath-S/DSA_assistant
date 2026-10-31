@@ -48,11 +48,9 @@ quieter button rather than the default.
   *Explain again* re-asks; *Show the fix* gives the corrected line when you
   want it.
 - **Ask follow-ups.** The box at the bottom of the panel takes any question
-  about your code, and remembers the last few exchanges, so a bare "why?" still
-  has a subject. Answers stack as notes, not as a chat transcript. Turns older
-  than that window are not dropped - they are folded into a short factual note
-  by the smallest model on the server already running, so a question about
-  something settled ten turns ago still has it behind it.
+  about your code, and remembers the last two exchanges, so a bare "why?" still
+  has a subject. Answers stack as notes, not as a chat transcript. Only the
+  last two exchanges are sent with a new question; older ones stay on screen.
 - **Select first to narrow the question.** Highlight part of your code — or part
   of an answer — and a chip appears showing what the question is about. "Why is
   this O(n²)?" needs to know which part *this* is.
@@ -69,12 +67,11 @@ quieter button rather than the default.
   holds the setup checklist and the model list. Every model on every running
   server is listed under its server; choosing one switches to that server, and
   starts it if it is not running.
-- **It starts itself.** On launch myIDE starts the one server your last model
-  belongs to - not both, which would cost gigabytes for a choice you have
-  already made - and selects that model. The first run has nothing to go on, so
-  it starts what is installed, takes the best model it finds, and remembers it.
-  Everything it started is stopped again when you close the app; anything that
-  was already running is left alone.
+- **It starts itself.** On launch myIDE starts the server your chosen model
+  belongs to - or, if you have not chosen one, just Ollama - picks the model,
+  and loads it before you ask anything. The header says *loading…* until it is
+  ready. Everything it started is stopped again when you close the app;
+  anything that was already running is left alone.
 - The question thread, the problem and the expected output all survive a
   restart, along with the code.
 - Drag the divider to resize; <kbd>Ctrl</kbd>+<kbd>+</kbd>/<kbd>-</kbd> for font
@@ -236,34 +233,83 @@ mutates a list in place, so the object is the same one it was before and `is`
 sees nothing happen — while the repr, which is what the reader and the model are
 shown, changes.
 
-### What a 1.5B does with all of this
+### Which model answers, and why it is the small one
 
-`qwen2.5-coder:1.5b` and a 7.6B were given the same wrong-answer prompt for the
-`two_sum` that returns `[1, 0]` instead of `[0, 1]`, once bare and once with the
-problem statement and the recorded trace:
+The app answers with the smallest coder-tuned model installed that does not
+think before it writes - `qwen2.5-coder:1.5b` on the machine this was built
+on. Measured through the app's own prompt, on an RTX 3050 with 4 GB:
 
-| | bare | with trace + problem |
-|---|---|---|
-| `qwen2.5-coder:1.5b` | 3.5s | 9.3s |
-| 7.6B (`logic:latest`) | 50.9s | 73.5s |
+| | warm answer | first visible word | |
+|---|---|---|---|
+| `qwen2.5-coder:1.5b` | 1.4s | 0.5s | fits on the GPU |
+| `qwen3:4b` | 30s | 24s | thinks before answering |
+| `logic:latest` (7.6B) | 58s | 43s | thinks, and does not fit |
 
-Speed was never the question. The 1.5B **wrote out the corrected code both
-times**, under a "Here's the corrected line:" heading, which is the one thing
-`SYSTEM_PROMPT` forbids and the whole reason the app exists. It also blamed the
-wrong line twice, and with the trace in hand narrated iterations that never
-happened. The 7.6B named line 6, explained the ordering assumption behind it,
-and closed with a question — the exact shape asked for — both times.
+This reverses an earlier decision. The 7.6B was the default for a while because
+its answers followed the teaching rule more carefully. They did, when they
+arrived - but it reasons privately for about forty seconds before writing a
+word, and with the reasoning hidden that looked exactly like nothing happening.
+Together with a request path that had no timeout, that is how the app came to
+feel broken: questions sat under a blinking caret and there was no telling slow
+from dead.
 
-So the 1.5B is not the default, and `pickDefaultModel` now refuses to default to
-anything under 3B while something larger is installed. It had been doing the
-opposite: it considered only names containing "coder", so a 1.5B coder beat a
-7.6B sitting beside it, and nothing looked broken because the panel still
-answered. Sizes now come from what the server reports — Ollama states
-`parameter_size` per tag — because a model pulled under a custom tag has no
-number in its name at all.
+Ollama reports which models think (`capabilities`, from `/api/show`), and a
+thinking model is never the default while anything else is installed. Pick one
+in Settings and it is asked not to think (`think: false`). Most honour that; a
+DeepSeek-R1 distill such as `logic:latest` reasons anyway, and the status line
+then says so and counts the seconds.
 
-The 1.5B is still in the picker. For "what does this error mean" it is genuinely
-the better trade; it just cannot be trusted to hold a rule.
+What the small model costs, measured:
+
+- **It ignores the no-fix rule.** Told not to, it wrote corrected code in 9 of 9
+  explanations of three common crashes. A short prompt with one worked example
+  and the rules repeated at the very end cut that to 4 of 12. The rest is
+  enforced mechanically: `withoutCode()` removes code blocks from the automatic
+  explanation and leaves a note saying *Show the fix* has it. Across those 12,
+  the reader was shown code 0 times. *Show the fix* is untouched, and so are
+  follow-up questions - asking for code outright still gets code.
+- **It rarely ends with a question** - 1 in 12.
+- **Without the recorded values it can explain the wrong cause.** For a
+  `KeyError` on `counts[ch] += 1` it once said dictionary keys "must be unique".
+  Given the values the app records - `counts = {}`, `ch = 'h'` - it named the
+  real cause three times out of three.
+
+With a bigger GPU, pick a larger model in Settings; the choice is remembered.
+Picks saved by earlier versions were forgotten once, because they were made
+while the app gave no sign of whether anything worked - and because the first
+run used to save its own automatic default as though it had been chosen.
+
+### Every request ends
+
+The request path used to have no timeout of any kind. Now every answer ends
+visibly, in one of two ways: the text and how long it took, or what went wrong
+and something to press. While it is on its way the line under it counts -
+*Asking qwen2.5-coder:1.5b…*, *Waiting… 6s (loading it, usually)*,
+*…is thinking before it answers… 12s*, *Writing…*.
+
+| What happened | What you see |
+|---|---|
+| Nothing listening | "Ollama is not running." with **Try again** and **Start it** |
+| No reply within 120s | "No reply … It may be too large for this machine" with **Choose a model** |
+| The stream stops for 45s | "stopped responding part-way through" |
+| Over 180s in all | "Gave up after …" |
+| Reasoning, then no answer | "finished without writing an answer" |
+| The model is not installed | "… is not installed in Ollama." |
+| The 600-token cap | the answer, marked "cut short at the length limit" |
+
+A question asked while nothing can answer it still goes into the thread, with
+the reason under it; it used to vanish, input cleared and nothing shown. Each
+request has its own controller, so asking no longer cancels an explanation that
+is still arriving, and **Run** cancels only the explanation of the previous run.
+
+The chosen model is loaded at launch rather than at the first question - the
+header says *loading…* meanwhile - and is kept loaded for 30 minutes between
+questions. The background summary of older turns is gone: it sent a second
+request, to a second model, after every answer, and on a 4 GB card the next
+question then had to load the first model again.
+
+`test/ai.test.mjs` runs `chat()` against a fake server that misbehaves in each
+of the ways in that table, and checks every one of them ends.
 
 Two details of real tracebacks are easy to get wrong, and both are covered:
 
@@ -405,11 +451,19 @@ that returns its indices backwards - scrubbing to step 10 of 13 shows `seen =
 before any explanation is read; the trace surviving a run with no crash at all;
 tracing switching off at the cap, with a 400,000-iteration loop measured against
 the same loop untraced; the problem statement and expected output persisting
-across a restart; the model picker listing four installed models and defaulting
-to the 7.6B rather than the 1.5B coder; both models answering the same
-wrong-answer prompt, timed, with and without the trace; and the packaged build -
+across a restart; the model picker listing four installed models; a 1.5B and a 7.6B
+answering the same wrong-answer prompt, timed, with and without the trace; and the packaged build -
 Monaco loading from inside `app.asar` with Python highlighting intact, and the
 harness running from `resources/python/` where `extraResources` puts it.
+
+Then, for the request path: the real app driven end to end, six launches,
+five with Ollama stopped and one with it running but nothing loaded. Each
+time the model warmed at launch (about 13s from stopped), then a crash was
+explained, six follow-ups asked including a bare "why?", both quick buttons
+pressed, and a question asked while an explanation was still arriving. 66 of
+66 were answered, most in 1-5s, the slowest in 21.9s. Ollama
+killed mid-session gave "Ollama is not running." with the question kept, and
+**Start it** brought it back and answered in 16s.
 
 Not exercised: a first-time download of a model that is not already on disk; the
 packaged app's **Run** button specifically (the harness was invoked directly from
@@ -427,6 +481,11 @@ The plan, and the notes needed to pick it up cold, are in **[NEXT.md](NEXT.md)**
 - **No breakpoints.** Stepping is a replay of a finished run, not a debugger:
   you cannot stop it, change a value, or continue.
 - **One file.** No open, no save-as, no tabs.
+- **The default ignores your hardware.** It is the smallest suitable model
+  whatever the GPU; a machine that could run a 7B comfortably still starts on
+  the 1.5B until someone picks the 7B in Settings.
+- **The problem statement is never cleared for you.** It survives restarts,
+  and if it describes an older problem, every answer is judged against that.
 - **One test case.** *Expected output* holds a single expected string, not a
   table of cases.
 - **`values` only at a crash.** The dedicated variables panel still needs an
