@@ -89,6 +89,31 @@ h3 {
 	background: rgba(240, 210, 100, 0.28);
 }
 
+/*
+ * Scrollbars as faint chalk, the way Monaco draws its own. The platform's,
+ * with arrow buttons and a grey track, was the heaviest thing in the panel.
+ */
+::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+	background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+	background: rgba(255, 255, 255, 0.08);
+	border: 2px solid transparent;
+	border-radius: 5px;
+	background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background-color: rgba(255, 255, 255, 0.16);
+}
+
 /* One focus ring for everything, in the action colour, only for the keyboard. */
 :focus-visible {
 	outline: 2px solid var(--yellow);
@@ -391,156 +416,215 @@ main {
 	flex: 1 1 auto;
 	min-height: 0;
 	overflow-y: auto;
-	padding: 14px 16px 18px;
+	padding: 20px 20px 24px;
 	display: flex;
 	flex-direction: column;
-	gap: 14px;
+	gap: 26px;
 }
 
 /* Shown only while the tutor has nothing to say. */
 .side-empty {
-	margin: auto 8px;
+	margin: 18vh 4px 0;
 	color: var(--chalk-3);
-	font-size: 13px;
+	font-size: 13.5px;
 	line-height: 1.6;
-	text-align: center;
-	max-width: 34ch;
-	align-self: center;
+	max-width: 36ch;
+}
+
+.side-empty p {
+	margin: 0;
+}
+
+.side-empty .side-empty-title {
+	margin-bottom: 6px;
+	font-family: var(--display);
+	font-stretch: semi-condensed;
+	font-weight: 400;
+	font-size: 24px;
+	line-height: 1.15;
+	color: var(--chalk-2);
 }
 
 .side-top:has(> .card:not([hidden]), > .thread:not(:empty), > .setup-banner:not([hidden])) .side-empty {
 	display: none;
 }
 
-/* --- drawers: the problem, and the expected output ------------------------ */
-
-.drawer {
-	flex: 0 0 auto;
-	background: var(--frame);
+/* Under the notes, and only when there are notes to clear. */
+.thread-clear {
+	align-self: flex-start;
+	margin-top: -6px;
 }
 
-.problem-drawer {
-	border-bottom: 1px solid var(--rule);
-}
-
-.drawer-head {
-	width: 100%;
-	justify-content: flex-start;
-	gap: 8px;
-	border: 0;
-	border-radius: 0;
-	padding: 8px 14px;
-	color: var(--chalk-2);
-	font-size: 12px;
-	min-width: 0;
-}
-
-.drawer-head:hover {
-	color: var(--chalk);
-	background: var(--well);
-}
-
-.drawer-title {
-	font-weight: 600;
-	white-space: nowrap;
-}
-
-.chev {
-	display: inline-block;
-	font-size: 12px;
-	color: var(--chalk-2);
-	transition: transform 140ms ease;
-}
-
-[aria-expanded="true"] > .chev {
-	transform: rotate(90deg);
-}
-
-.opt {
-	color: var(--chalk-3);
-	font-size: 11.5px;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	min-width: 0;
-}
-
-.drawer-head[aria-expanded="true"] .opt {
+.thread:empty + .thread-clear {
 	display: none;
 }
 
-.drawer-box {
-	display: block;
-	width: calc(100% - 28px);
-	margin: 0 14px 12px;
+/* --- the panel under the code: output, test cases, problem --------------- */
+
+/*
+ * One panel, three tabs. It used to be a problem drawer above the code and two
+ * more drawers in a strip beside the output - five headings and four borders
+ * around one editor. Only one of them is ever being read at a time.
+ */
+.hsplit {
+	flex: 0 0 5px;
+	margin-top: -2px;
+	cursor: row-resize;
+	position: relative;
+	z-index: 2;
+}
+
+.hsplit::after {
+	content: '';
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: 2px;
+	height: 1px;
+	background: var(--rule);
+	transition: background-color 120ms ease, height 120ms ease;
+}
+
+.hsplit:hover::after,
+.hsplit.dragging::after {
+	background: var(--yellow);
+	height: 2px;
+}
+
+.panel {
+	flex: 0 0 auto;
+	/* --panel-h is moved by the splitter above it and remembered. */
+	height: var(--panel-h, 32%);
+	min-height: 120px;
+	display: flex;
+	flex-direction: column;
+	background: var(--frame);
+}
+
+.tabs {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: stretch;
+	gap: 4px;
+	padding: 0 12px;
+	height: 38px;
+}
+
+/* Text on the frame, underlined in chalk when it is the one showing. */
+.tab {
+	position: relative;
+	gap: 6px;
+	padding: 0 8px;
+	border: 0;
+	border-radius: 0;
+	color: var(--chalk-3);
+	font-size: 12.5px;
+	font-weight: 600;
+}
+
+.tab:hover {
+	color: var(--chalk-2);
+}
+
+/* Drawn round the label, not the whole height of the strip. */
+.tab:focus-visible {
+	outline-offset: -7px;
+	border-radius: 9px;
+}
+
+.tab[aria-selected="true"] {
+	color: var(--chalk);
+}
+
+.tab[aria-selected="true"]::after {
+	content: '';
+	position: absolute;
+	left: 8px;
+	right: 8px;
+	bottom: 6px;
+	height: 2px;
+	border-radius: 1px;
+	background: var(--chalk);
+}
+
+/* Something is in it - so a problem from yesterday cannot hide behind a tab. */
+.tab-dot {
+	display: none;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--chalk-2);
+}
+
+.tab.filled .tab-dot {
+	display: inline-block;
+}
+
+.tab-panel {
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+.tests-panel {
+	flex-direction: row;
+	gap: 12px;
+	padding: 0 16px 14px;
+}
+
+.problem-panel {
+	padding: 0 16px 14px;
+}
+
+.field {
+	flex: 1 1 0;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.field-label {
+	color: var(--chalk-2);
+	font-size: 12px;
+}
+
+/* The only boxes in the panel, because they are the only things typed into. */
+.field-box {
+	flex: 1 1 auto;
+	min-height: 0;
+	width: 100%;
 	padding: 9px 11px;
 	background: var(--board);
 	border: 1px solid var(--rule);
 	border-radius: var(--r-sm);
 	color: var(--chalk);
-	font-family: var(--ui);
-	font-size: 13px;
-	line-height: 1.55;
-	resize: vertical;
-}
-
-.drawer-box::placeholder {
-	color: var(--chalk-3);
-}
-
-.drawer-box:focus {
-	outline: none;
-	border-color: var(--yellow);
-}
-
-.problem-drawer .drawer-box {
-	max-height: 30vh;
-}
-
-.expect-drawer .drawer-box {
 	font-family: var(--mono);
-	font-size: 12px;
-	flex: 1;
-	min-height: 0;
+	font-size: 12.5px;
+	line-height: 1.6;
 	resize: none;
 }
 
-/* --- the console: output beside what it should have been ----------------- */
-
-.console {
-	flex: 0 0 auto;
-	height: 30%;
-	min-height: 130px;
-	display: flex;
-	border-top: 1px solid var(--rule);
-	background: var(--frame);
+.problem-panel .field-box {
+	font-family: var(--ui);
+	font-size: 13.5px;
+	line-height: 1.6;
 }
 
-.out-pane {
-	flex: 1 1 auto;
-	min-width: 0;
-	display: flex;
-	flex-direction: column;
+.field-box::placeholder {
+	color: var(--chalk-3);
 }
 
-.pane-head {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 8px 14px;
-	min-height: 34px;
-}
-
-.pane-title {
-	font-size: 12px;
-	font-weight: 600;
-	color: var(--chalk-2);
+.field-box:focus {
+	outline: none;
+	border-color: var(--yellow);
 }
 
 .out {
 	flex: 1;
 	margin: 0;
-	padding: 0 14px 14px;
+	padding: 2px 16px 14px;
 	overflow: auto;
 	font-family: var(--mono);
 	font-size: 12.5px;
@@ -558,6 +642,11 @@ main {
 	color: var(--pink);
 }
 
+/* A traceback's frames are the route; only its last line is the error. */
+.out .stderr-route {
+	color: var(--chalk-3);
+}
+
 /* Streamed output arrives before the run ends and the panel is redrawn. */
 .out:not(:empty) + .out-empty {
 	display: none;
@@ -565,26 +654,100 @@ main {
 
 .out-empty {
 	margin: 0;
-	padding: 0 14px 14px;
+	padding: 2px 16px 14px;
 	color: var(--chalk-3);
+	font-size: 12.5px;
+}
+
+/*
+ * What a Solution returned: the call quiet, the answer in chalk, and a mark
+ * when there was something to check it against. Set as a ledger, one case to
+ * a row, because reading down the answers is how a pattern in them shows.
+ */
+.returns {
+	list-style: none;
+	margin: 0 0 6px;
+	padding: 2px 16px 0;
+	font-family: var(--mono);
+	font-size: 12.5px;
+	line-height: 1.6;
+	overflow: auto;
+	flex: 0 1 auto;
+	min-height: 0;
+}
+
+/* Sharing the panel with printed output: each keeps room to be read. */
+.returns:has(~ .out:not(:empty)) {
+	max-height: 60%;
+}
+
+.returns li {
+	display: grid;
+	grid-template-columns: 14px minmax(0, auto) minmax(0, 1fr);
+	column-gap: 12px;
+	align-items: baseline;
+	padding: 3px 0;
+}
+
+.returns .r-mark {
+	font-family: var(--ui);
+	font-weight: 700;
+	color: var(--chalk-3);
+}
+
+.returns .r-mark.pass {
+	color: var(--mint);
+}
+
+.returns .r-mark.fail {
+	color: var(--orange);
+}
+
+.returns .r-args {
+	color: var(--chalk-3);
+	overflow-wrap: anywhere;
+}
+
+.returns .r-val {
+	color: var(--chalk);
+	overflow-wrap: anywhere;
+}
+
+.returns .r-val::before {
+	content: "→ ";
+	color: var(--chalk-3);
+}
+
+.returns .r-want {
+	grid-column: 3;
+	color: var(--orange);
+	font-size: 12px;
+	overflow-wrap: anywhere;
+}
+
+.returns .r-want::before {
+	content: "expected ";
+	color: var(--chalk-3);
+}
+
+.returns li.r-note {
+	display: block;
+	color: var(--chalk-3);
+	font-family: var(--ui);
 	font-size: 12px;
 }
 
-/* Collapsed it is a tab at the side; open it takes a third of the console. */
-.expect-drawer {
-	flex: 0 0 auto;
-	display: flex;
-	flex-direction: column;
-	border-left: 1px solid var(--rule);
-	max-width: 40%;
+/* A design call that returns nothing - the constructor, push, put - is half
+   of every case; set quieter, the answers that matter stand out. */
+.returns li.r-quiet .r-args,
+.returns li.r-quiet .r-val {
+	color: var(--chalk-3);
+	opacity: 0.75;
 }
 
-.expect-drawer:has(> .drawer-box:not([hidden])) {
-	flex-basis: 36%;
-}
-
-.expect-drawer .drawer-head {
-	min-height: 34px;
+/* Streamed output, or none at all, sits under the answers. */
+.returns:not([hidden]) ~ .out-empty {
+	display: none;
 }
 
 /* --- the tutor's cards ---------------------------------------------------- */
@@ -592,11 +755,11 @@ main {
 /*
  * Not boxes in a grid: each is a passage on the board, set off by a rule of
  * its own colour down the left, so the kind of problem reads before a word
- * of it does.
+ * of it does. Inside, nothing is boxed: the rule is the frame.
  */
 .card {
 	position: relative;
-	padding: 2px 0 2px 16px;
+	padding: 2px 0 4px 18px;
 	animation: arrive 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
@@ -604,8 +767,8 @@ main {
 	content: '';
 	position: absolute;
 	left: 0;
-	top: 3px;
-	bottom: 3px;
+	top: 4px;
+	bottom: 4px;
 	width: 3px;
 	border-radius: 2px;
 	background: var(--rule-2);
@@ -632,8 +795,17 @@ main {
 	background: var(--orange);
 }
 
-.card.ok.stalled .err-type {
+.card.ok.stalled .verdict {
 	color: var(--orange);
+}
+
+/* Waiting on the reader - a test case to call the Solution with. */
+.card.ok.asking::before {
+	background: var(--yellow);
+}
+
+.card.ok.asking .verdict {
+	color: var(--yellow);
 }
 
 @keyframes arrive {
@@ -643,42 +815,36 @@ main {
 	}
 }
 
-.card-head {
-	display: flex;
-	align-items: baseline;
-	justify-content: space-between;
-	gap: 10px;
-	margin-bottom: 4px;
-}
-
 /*
- * The headline is the error's own name, set large in the condensed face:
- * "IndexError" is the thing a student will search for, and the first thing
- * worth reading.
+ * The verdict - the error's own name, "Wrong answer", "All 3 match" - set large
+ * in the condensed face. It is the one loud thing on this side of the window,
+ * and everything under it is quieter on purpose.
  */
-.err-type {
+.verdict {
+	margin: 0 0 6px;
 	font-family: var(--display);
 	font-weight: 600;
 	font-stretch: semi-condensed;
-	font-size: 22px;
-	line-height: 1.15;
+	font-size: 26px;
+	line-height: 1.1;
 	letter-spacing: 0.005em;
 	color: var(--pink);
 	overflow-wrap: anywhere;
 }
 
-.err-type.wrong {
+.verdict.wrong {
 	color: var(--orange);
 }
 
-.err-type.ok {
+.verdict.ok {
 	color: var(--mint);
 }
 
+/* Python's own words, under its name. */
 .err-msg {
-	margin: 0 0 10px;
-	font-family: var(--mono);
-	font-size: 12px;
+	margin: 0 0 12px;
+	font-size: 14px;
+	line-height: 1.45;
 	color: var(--chalk-2);
 	overflow-wrap: anywhere;
 }
@@ -687,36 +853,56 @@ main {
 	display: none;
 }
 
-.hint {
-	margin: 0 0 10px;
-	color: var(--chalk);
-	font-size: 13.5px;
+/* Where it happened, as a sentence, with the line number as the way back to it. */
+.where {
+	margin: 0 0 14px;
+	color: var(--chalk-3);
+	font-size: 13px;
 	line-height: 1.55;
+	overflow-wrap: anywhere;
 }
 
-.err-line {
-	margin: 0 0 12px;
-	padding: 8px 11px;
-	background: var(--well);
-	border: 1px solid var(--rule);
-	border-radius: var(--r-sm);
+.where code {
 	font-family: var(--mono);
 	font-size: 12.5px;
-	color: var(--chalk);
-	overflow-x: auto;
-	white-space: pre;
+	font-weight: 350;
+	color: var(--chalk-2);
 }
 
-.card.crash .err-line {
-	border-left: 2px solid var(--pink);
+.jump {
+	display: inline;
+	padding: 0;
+	border: 0;
+	font-size: inherit;
+	color: var(--chalk);
+	text-decoration: underline;
+	text-decoration-color: var(--rule-2);
+	text-underline-offset: 3px;
+}
+
+.jump:hover {
+	color: var(--yellow);
+	text-decoration-color: currentColor;
+}
+
+.hint {
+	margin: 0 0 14px;
+	color: var(--chalk);
+	font-size: 14px;
+	line-height: 1.6;
+	max-width: 62ch;
+}
+
+.hint:empty {
+	display: none;
 }
 
 /* The explanation: the longest reading on the board, so it gets body text. */
 .explain {
 	color: var(--chalk);
 	font-size: 14px;
-	line-height: 1.62;
-	max-width: 68ch;
+	line-height: 1.65;
+	max-width: 62ch;
 }
 
 .explain:empty {
@@ -736,28 +922,31 @@ main {
 	color: #fff;
 }
 
+/*
+ * Code in a sentence is still part of the sentence: the code face, not a box.
+ * Cascadia sets darker than the body face at the same weight, and the small
+ * models put code in nearly every line, so it is lightened to sit level.
+ */
 .explain code {
 	font-family: var(--mono);
 	font-size: 12.5px;
-	background: var(--well);
-	border: 1px solid var(--rule);
-	padding: 0 5px;
+	font-weight: 350;
+	color: #dfe3da;
+	background: rgba(255, 255, 255, 0.04);
+	padding: 1px 4px;
 	border-radius: 4px;
-	color: var(--yellow);
 }
 
 .explain pre {
 	margin: 10px 0;
 	padding: 10px 12px;
 	background: var(--well);
-	border: 1px solid var(--rule);
 	border-radius: var(--r-sm);
 	overflow-x: auto;
 }
 
 .explain pre code {
 	background: none;
-	border: 0;
 	padding: 0;
 	color: var(--chalk);
 	line-height: 1.55;
@@ -784,8 +973,8 @@ main {
 	display: flex;
 	align-items: center;
 	flex-wrap: wrap;
-	gap: 8px;
-	margin-top: 12px;
+	gap: 6px 20px;
+	margin-top: 14px;
 }
 
 /* Button labels are two or three words; wrapping them mid-phrase looks broken. */
@@ -803,6 +992,38 @@ main {
 	color: var(--chalk-3);
 	font-size: 11.5px;
 	font-variant-numeric: tabular-nums;
+}
+
+/*
+ * A secondary action as words, not a box: there are several on this side of
+ * the window, and outlining every one of them was most of what made it busy.
+ */
+.act {
+	padding: 2px 0;
+	border: 0;
+	border-radius: 0;
+	color: var(--chalk-2);
+	font-size: 12.5px;
+	font-weight: 600;
+	text-decoration: underline;
+	text-decoration-color: transparent;
+	text-underline-offset: 4px;
+	transition: color 120ms ease, text-decoration-color 120ms ease;
+}
+
+.act:hover:not(:disabled) {
+	color: var(--yellow);
+	text-decoration-color: currentColor;
+}
+
+/*
+ * Deliberately the quieter of the two: understanding the mistake is the point,
+ * and seeing the answer should feel like a decision rather than the obvious
+ * next click.
+ */
+.act.quiet {
+	color: var(--chalk-3);
+	font-weight: 400;
 }
 
 /* --- the state of an answer ------------------------------------------------
@@ -857,18 +1078,14 @@ main {
  * name, then what it held.
  */
 .values {
-	margin: 0 0 12px;
-	padding: 9px 11px;
-	background: var(--well);
-	border: 1px solid var(--rule);
-	border-radius: var(--r-sm);
+	margin: 0 0 16px;
 }
 
 .values-head {
 	display: block;
 	color: var(--chalk-3);
-	font-size: 11.5px;
-	margin-bottom: 5px;
+	font-size: 12px;
+	margin-bottom: 4px;
 }
 
 .values-rows {
@@ -880,9 +1097,9 @@ main {
 }
 
 .values-rows td {
-	padding: 2px 0;
+	padding: 4px 0;
 	vertical-align: top;
-	border-top: 1px dashed var(--rule);
+	border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .values-rows tr:first-child td {
@@ -892,7 +1109,7 @@ main {
 .values-rows .vname {
 	color: var(--blue);
 	white-space: nowrap;
-	padding-right: 14px;
+	padding-right: 18px;
 	width: 1%;
 }
 
@@ -910,13 +1127,27 @@ main {
 	color: var(--yellow);
 }
 
+/* In a loop that cannot end: the names its condition reads, which never moved. */
+.values-rows tr.stuck .vname,
+.values-rows tr.stuck .vval {
+	color: var(--pink);
+}
+
+.values-rows .vnote {
+	font-family: var(--ui);
+	font-size: 11px;
+	color: var(--chalk-3);
+	margin-left: 8px;
+	word-break: normal;
+}
+
 /* --- wrong answer -------------------------------------------------------- */
 
 .diff {
 	display: grid;
 	grid-template-columns: 1fr 1fr;
-	gap: 8px;
-	margin: 6px 0 12px;
+	gap: 18px;
+	margin: 6px 0 14px;
 }
 
 .diff-col {
@@ -926,29 +1157,25 @@ main {
 .diff-label {
 	display: block;
 	color: var(--chalk-3);
-	font-size: 11.5px;
-	margin-bottom: 4px;
+	font-size: 12px;
+	margin-bottom: 2px;
 }
 
+/* The two answers themselves, set large: they are what the card is about. */
 .diff-text {
 	margin: 0;
-	padding: 8px 10px;
-	background: var(--well);
-	border: 1px solid var(--rule);
-	border-radius: var(--r-sm);
 	font-family: var(--mono);
-	font-size: 12px;
+	font-size: 15px;
 	line-height: 1.5;
-	color: var(--mint);
+	color: var(--chalk);
 	white-space: pre-wrap;
 	word-break: break-word;
-	max-height: 140px;
+	max-height: 160px;
 	overflow: auto;
 }
 
 .diff-text.bad {
 	color: var(--orange);
-	border-color: rgba(242, 166, 90, 0.35);
 }
 
 /* --- stepping through the run -------------------------------------------- */
@@ -977,6 +1204,17 @@ main {
 .trace-title {
 	font-weight: 600;
 	font-size: 13px;
+}
+
+.chev {
+	display: inline-block;
+	width: 10px;
+	color: var(--chalk-3);
+	transition: transform 140ms ease;
+}
+
+[aria-expanded="true"] > .chev {
+	transform: rotate(90deg);
 }
 
 .trace-head .meta {
@@ -1036,7 +1274,7 @@ main {
 .thread {
 	display: flex;
 	flex-direction: column;
-	gap: 18px;
+	gap: 22px;
 }
 
 .thread:empty {
@@ -1187,23 +1425,15 @@ main {
 .ask-quick {
 	display: flex;
 	align-items: center;
-	gap: 6px;
-	margin-top: 9px;
+	gap: 4px 18px;
+	margin-top: 8px;
+	padding-left: 2px;
 	flex-wrap: wrap;
 }
 
-.chip {
-	padding: 4px 11px;
-	border: 1px solid var(--rule);
-	border-radius: 999px;
-	color: var(--chalk-2);
-	font-size: 12px;
+.ask-quick .act {
+	font-weight: 400;
 	white-space: nowrap;
-}
-
-.chip:hover:not(:disabled) {
-	border-color: var(--yellow);
-	color: var(--yellow);
 }
 
 /* --- inline error decorations (in the editor) ---------------------------- */

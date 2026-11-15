@@ -206,7 +206,7 @@ export async function listModels(provider) {
  * three answers each: the longer rule list this replaced gave away the fix in
  * 9 of 9 and never ended with a question. This shape, with the rules repeated
  * at the very end of the request, cut that to 4 of 9. The rest is enforced
- * mechanically - see withoutCode() - because "usually" is not good enough for
+ * mechanically - see teachingOnly() - because "usually" is not good enough for
  * the one thing the app exists to do.
  */
 export const SYSTEM_PROMPT = [
@@ -216,7 +216,11 @@ export const SYSTEM_PROMPT = [
 	'Reply in at most 4 sentences, then ask the student one question.',
 ].join(NL);
 
-/** One worked exchange, on a different bug, so the model sees the shape of a good answer. */
+/**
+ * One worked exchange, on a different bug, so the model sees the shape of a good
+ * answer. A crash, so it is only sent with a crash: next to a wrong answer the
+ * 1.5B copies the IndexError into it (see buildTeaching()).
+ */
 export const TEACHING_EXAMPLE = [
 	{
 		role: 'user',
@@ -250,21 +254,170 @@ export const TEACHING_RULES = [
 	'Your LAST sentence must be one question for the student.',
 ].join(NL);
 
+/** Said once, at the end, wherever a fix was taken out of a teaching answer. */
+export const FIX_LEFT_OUT = '(How to fix it was left out - press Show the fix if you want it.)';
+
+/** What is shown when the model wrote nothing but the fix. */
+export const ONLY_A_FIX = 'The answer that came back was only the fix, so it is not shown here. '
+	+ 'Press Explain again for an explanation, or Show the fix to see it.';
+
 /**
- * Takes fenced code out of a teaching answer.
+ * A sentence that hands over the fix instead of explaining the mistake.
  *
- * The model is told not to write the fix, and a 1.5B often does anyway - a
- * corrected line in a code block is the commonest way. Removing the block, and
- * saying where it went, keeps the explanation and keeps the answer behind
- * "Show the fix" where it was meant to be. An unclosed fence - an answer still
- * streaming, or cut short - is removed from the fence to the end.
+ * Measured on the 1.5B default, 24 automatic explanations of four bugs: 21
+ * gave the fix away in words, nearly always straight after a correct
+ * diagnosis - "To fix this, change `columnNumber -= 1` to ...", "Here's how
+ * you can do it:", "you should use `counts[ch] = 1` instead". Code blocks were
+ * already removed; this is the same thing in prose. Tested a sentence at a
+ * time, with inline code blanked so a word inside it cannot match.
  */
-export function withoutCode(text) {
-	const NOTE = '(A code fix was left out here - press Show the fix if you want to see it.)';
-	return String(text ?? '')
-		.replace(/```[^\n]*\n[\s\S]*?```/g, NOTE)
-		.replace(/```[\s\S]*$/, NOTE)
-		.trim();
+const FIX_SENTENCE = new RegExp([
+	// Announcing one.
+	String.raw`\bto (fix|correct|resolve|solve|repair) (this|it|that|the)\b`,
+	String.raw`\b(one|another|a simple|the simplest|an easy|the easiest|a better|the correct|the right|the proper) (way|fix|solution|approach) (to|is|would|here)\b`,
+	String.raw`\bthe (fix|solution) (is|would be|here)\b`,
+	String.raw`\b(can|could) be (fixed|solved|corrected|resolved) by\b`,
+	String.raw`\b(here'?s|here is|below is) (how|what|the|a|an)\b`,
+	String.raw`\b(corrected|fixed|modified|updated|revised) (code|version|line|function|loop|condition|solution)\b`,
+	// Telling them what to type.
+	String.raw`\b(you|we) (should|need to|must|have to|can|could|might want to|may want to|'ll need to|will need to|would need to)( simply| just| first| also)? (add|change|replace|use|initiali[sz]e|insert|reverse|decrement|increment|update|modify|remove|delete|move|set|check|append|prepend|subtract|swap|start|begin|include|rewrite|put|wrap|convert|return|break|declare|define|assign|switch|adjust|ensure|make sure)\b`,
+	String.raw`^(simply |just |first,? |instead,? )?(add|change|replace|use|initiali[sz]e|insert|swap|move|rewrite|remove|wrap|switch|adjust|ensure|make sure)\b`,
+	String.raw`\b(consider|try|start by) (using|adding|changing|replacing|initiali[sz]ing|checking|reversing|moving|removing|swapping)\b`,
+	String.raw`\bshould (be|read|say|look like) \x60`,
+].join('|'), 'i');
+
+/** Words that make a sentence about what the code ought to be, rather than what it is. */
+const OUGHT = /\b(should|needs? to|must|ought to|has to|have to|instead)\b/i;
+
+/** Inline code that reads as a statement or expression, not a bare value like "AB" or 12. */
+const STATEMENT = /[A-Za-z_]\w*\s*(?:[-+*/%]?=|[([.<>]|\b(?:in|not|and|or)\b)/;
+
+/** `nums[0]`, `self.count`, `memo["a"]`: one of their names and a value it holds. */
+const REFERENCE = /^([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*|\[\s*(?:-?\d+|'[^']*'|"[^"]*")\s*\])*$/;
+
+const squash = s => String(s).replace(/\s+/g, '');
+
+/**
+ * "The loop should start from `i = 0`, not `i = 1`" - the corrected code, in a
+ * sentence. Told apart from "it should return `"AB"`" (a value, the expected
+ * answer), "`columnNumber` should go down" (their own code, a hint) and
+ * "`nums[0]` should be added too" (a value of theirs, the symptom) by whether
+ * the code it puts forward is code the student did not write.
+ */
+function proposesNewCode(sentence, code) {
+	if (!OUGHT.test(sentence)) {
+		return false;
+	}
+	const theirs = squash(code);
+	const theirValue = span => {
+		const name = REFERENCE.exec(span)?.[1];
+		return name !== undefined && new RegExp(`\\b${name}\\b`).test(code);
+	};
+	return [...sentence.matchAll(/`([^`]+)`/g)]
+		.map(m => m[1].trim())
+		.some(span => STATEMENT.test(span) && !theirs.includes(squash(span)) && !theirValue(span));
+}
+
+/** One line of code, as it would be compared: no line-number prefix, spaces collapsed. */
+function codeLine(line) {
+	return line.replace(/^\s*\d+\s*>?\s/, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Whether a fenced block only quotes the student's own code. "The line that
+ * produces the wrong value is:" followed by that line is pointing, not fixing,
+ * and is worth keeping; a block with any line they did not write is a fix.
+ */
+function quotesOnly(block, code) {
+	const theirs = new Set(String(code ?? '').split('\n').map(codeLine).filter(Boolean));
+	const lines = block.split('\n').map(codeLine).filter(l => l && l !== '...');
+	return lines.length > 0 && lines.every(l => theirs.has(l));
+}
+
+/**
+ * The sentences of some prose, each with its own trailing space, so joining
+ * them gives the prose back. A full stop ends one only when a space follows
+ * it, so `nums.append` and 1.5 stay whole.
+ */
+function sentencesOf(prose) {
+	return prose.match(/(?:[^.!?\n]|[.!?](?!\s|$))*(?:[.!?]+(?=\s|$)|\n|$)\s*/g)?.filter(Boolean) ?? [];
+}
+
+const sameWords = s => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * Keeps a teaching answer to teaching.
+ *
+ * The 1.5B default explains well and then, nearly every time, goes on to say
+ * how to fix it - in a code block, or in words. Asking it not to does not hold,
+ * so this is enforced here: the answer is cut at the first sentence or block
+ * that hands over the fix, and a note says so. A block that only quotes the
+ * student's own lines stays, since pointing at a line is the explanation.
+ *
+ * Two tidy-ups ride along. It sometimes repeats the question it was asked, as
+ * if a heading ("Why does the loop on line 4 never end?"), so a sentence of
+ * the request's closing question is dropped; and told to "ask the student a
+ * question" it writes "Ask the student:" in front of one, which is removed.
+ *
+ * Safe on a partial answer: a fence still arriving is held back until it
+ * closes, so a fix being typed out is never shown, even briefly.
+ *
+ * @param {string} text The model's answer, reasoning already removed.
+ * @param {{ code?: string, closing?: string }} [context] The student's code,
+ *        and the last line of the request.
+ */
+export function teachingOnly(text, { code = '', closing = '' } = {}) {
+	const source = String(text ?? '');
+	const asked = new Set(sentencesOf(String(closing)).map(sameWords).filter(s => s.length > 12));
+
+	const kept = [];
+	let cut = false;
+	const fence = /```[^\n]*\n?([\s\S]*?)(```|$)/g;
+	let at = 0;
+
+	const prose = segment => {
+		for (const sentence of sentencesOf(segment)) {
+			const flat = sentence.replace(/\s+/g, ' ').trim();
+			if (FIX_SENTENCE.test(flat.replace(/`[^`]*`/g, '`x`')) || proposesNewCode(flat, code)) {
+				cut = true;
+				return;
+			}
+			if (asked.has(sameWords(flat))) {
+				continue;
+			}
+			// "Question:", and its bold forms "**Question:**" and "**Question**:".
+			kept.push(sentence.replace(/^(\s*)[*_]{0,2}(?:ask the student|question for the student|question)[*_]{0,2}\s*:\s*[*_]{0,2}\s*/i, '$1'));
+		}
+	};
+
+	for (let m = fence.exec(source); m && !cut; m = fence.exec(source)) {
+		prose(source.slice(at, m.index));
+		at = fence.lastIndex;
+		if (cut) {
+			break;
+		}
+		if (m[2] !== '```') {
+			break;   // still arriving: shown once it closes, if it is only a quote
+		}
+		if (quotesOnly(m[1], code)) {
+			kept.push(m[0]);
+		} else {
+			cut = true;
+			// "Change line 7 to:" with nothing after it reads as broken.
+			while (kept.length && /:\s*$/.test(kept[kept.length - 1])) {
+				kept.pop();
+			}
+		}
+	}
+	if (!cut && at < source.length && !/```/.test(source.slice(at))) {
+		prose(source.slice(at));
+	}
+
+	const answer = kept.join('').trim();
+	if (!cut) {
+		return answer;
+	}
+	return answer ? `${answer}\n\n${FIX_LEFT_OUT}` : ONLY_A_FIX;
 }
 
 /**
@@ -275,7 +428,8 @@ export const SYSTEM_PROMPT_REVEAL = [
 	'You are helping someone learning data structures and algorithms who has',
 	'looked at the problem and asked to be shown the fix.',
 	'',
-	'Work only from the traceback, or the expected and actual output, you are given.',
+	'Work only from the facts you are given: the traceback, the expected and',
+	'actual answer, or where a loop that never ended was stuck.',
 	'',
 	'Rules:',
 	'- Give the corrected line or lines, and nothing more of the solution.',
@@ -335,6 +489,114 @@ export function formatTrace(trace, limit = 24) {
 	return lines.join(NL);
 }
 
+/**
+ * The one call that produced the answer, folded into how each name changed.
+ *
+ * The step-by-step recording is exact, and a 1.5B cannot follow it: given the
+ * twelve steps of a convertToTitle that returns "BA" for "AB", it blamed the
+ * arithmetic on a correct line in four answers of six. Folded down to
+ * `ans: [] -> ['B'] -> ['B', 'A']` beside the line that returned it, the order
+ * the letters were made in is on one line.
+ *
+ * Which call: for a Solution, the method's `caseIndex`-th outermost call - the
+ * harness calls it once per case, in order. For anything else, the last
+ * function that returned a value, which is the one that produced the answer.
+ * Undefined when that call cannot be found whole: the middle of a long run was
+ * dropped across it, or recording stopped before it ended. Better no summary
+ * than one of the wrong call.
+ *
+ * @returns {{ fn: string, names: Array<[string, string[]]>, returned?: { line: number, value: string } } | undefined}
+ */
+export function callHistory(trace, { method, caseIndex = 0 } = {}) {
+	const steps = trace?.steps ?? [];
+	let key;
+	if (method) {
+		const depths = steps.filter(s => s.fn === method).map(s => s.d);
+		key = depths.length ? `${method}#${Math.min(...depths)}` : undefined;
+	} else {
+		const last = steps.findLast(s => s.ret !== undefined && s.fn !== '<module>');
+		key = last && `${last.fn}#${last.d}`;
+	}
+	if (!key) {
+		return undefined;
+	}
+
+	// One entry per call: a call ends at its frame's "r" step.
+	const calls = [];
+	let current;
+	steps.forEach((step, at) => {
+		if (`${step.fn}#${step.d}` !== key) {
+			return;
+		}
+		current ??= { from: at, steps: [] };
+		current.steps.push(step);
+		if (step.r) {
+			calls.push({ ...current, to: at });
+			current = undefined;
+		}
+	});
+
+	// Recording that stopped early saw only the start of a run: its last call
+	// is not the one that made the answer. A Solution's call for one case is
+	// either recorded to its end, and counted, or not counted at all.
+	const call = method ? calls[caseIndex] : trace.truncated ? undefined : calls.at(-1);
+	const gap = trace.dropped ? trace.gapAt : undefined;
+	// A dropped middle shifts the count for every call after it, and a call
+	// the gap runs through is missing its own middle.
+	if (!call || (gap !== undefined && (method ? call.to >= gap : call.from < gap && call.to >= gap))) {
+		return undefined;
+	}
+
+	const names = new Map();
+	for (const step of call.steps) {
+		for (const [name, value] of Object.entries(step.vars ?? {})) {
+			const seen = names.get(name) ?? [];
+			if (seen.at(-1) !== value) {
+				seen.push(value);
+			}
+			names.set(name, seen);
+		}
+	}
+	const ret = call.steps.find(s => s.ret !== undefined);
+	return {
+		fn: key.split('#')[0],
+		names: [...names],
+		returned: ret && { line: ret.line, value: ret.ret },
+	};
+}
+
+/**
+ * A wrong design case as the calls up to the first wrong one: what each
+ * returned, and the object's self.<name> values after it, where they changed.
+ *
+ * A design bug is nearly always a call that answered correctly and left the
+ * object wrong - pop() taking from one list and not the other - so the state
+ * between calls is the evidence. Measured on two such bugs, 8 answers each,
+ * against the raw steps of the run: about twice as many named the cause (it is
+ * still a minority on the 1.5B), states that never happened were invented
+ * less, and answers came back sooner.
+ *
+ * @param {{ steps: Array<{op: string, args: string, shown: string, expected?: string, state?: object}>, first: number }} design
+ */
+function designStory({ steps, first }) {
+	let before = '';
+	const rows = steps.slice(0, first + 1).map((s, i) => {
+		const state = Object.entries(s.state ?? {}).map(([k, v]) => `${k} = ${v}`).join(', ');
+		const ret = i === first ? ` returned ${s.shown}, expected ${s.expected}`
+			: s.shown === 'null' ? '' : ` returned ${s.shown}`;
+		const after = state && state !== before ? `${ret ? ';' : ' ->'} then ${state}` : '';
+		before = state || before;
+		return `  ${i + 1}. ${s.op}(${s.args})${ret}${after}`;
+	});
+	return rows.length > 16 ? [...rows.slice(0, 3), '  ...', ...rows.slice(-12)] : rows;
+}
+
+/** `a -> b -> c`, keeping both ends of a long run of values. */
+function arrows(values, keep = 8) {
+	const shown = values.length > keep ? [...values.slice(0, 3), '...', ...values.slice(-(keep - 4))] : values;
+	return shown.join(' -> ');
+}
+
 /** How the trace should be introduced, given what was left out of it. */
 function traceHeading(trace, shownCount) {
 	const total = trace.steps.length;
@@ -388,16 +650,88 @@ function problemBlock(problem) {
 	];
 }
 
+/** The source with line numbers, and `mark` flagged with a >. */
+function numbered(code, mark) {
+	return code.split('\n')
+		.map((l, i) => `${String(i + 1).padStart(4)}${i + 1 === mark ? ' >' : '  '} ${l}`)
+		.join('\n');
+}
+
+/** What each test case of a Solution returned, one per line. */
+function callsBlock(calls) {
+	return (calls ?? []).slice(0, 12).map(c => `  ${c.call} returned ${c.shown}`).join(NL);
+}
+
+/**
+ * Where a run that would not end was stuck, as the harness's watchdog saw it.
+ * The verdict is the harness's, from facts: a while loop is called stuck only
+ * when none of the names its condition reads changed while it was watched.
+ */
+function loopBlock(code, loop) {
+	const where = loop.loop;
+	const line = where?.line ?? loop.line;
+	const parts = [
+		loop.stuck
+			? `The program never finished. It was stopped after ${loop.seconds} seconds, stuck in a loop that cannot end.`
+			: `The program had not finished after ${loop.seconds} seconds and was stopped. It may be very slow, or it may never end.`,
+		'',
+	];
+	if (loop.case) {
+		parts.push(`IT WAS RUNNING THIS TEST CASE: ${loop.case}`, '');
+	}
+	if (where) {
+		parts.push(where.kind === 'while'
+			? `IT WAS INSIDE THE while LOOP ON LINE ${where.line}, WHOSE CONDITION IS: ${where.condition}`
+			: `IT WAS INSIDE THE for LOOP ON LINE ${where.line}, OVER: ${where.condition}`, '');
+	}
+	const locals = Object.entries(loop.locals ?? {});
+	if (locals.length) {
+		const rows = locals.map(([k, v]) => `  ${k} = ${v}   (${loop.changed?.includes(k) ? 'was changing' : 'did NOT change'})`);
+		parts.push(
+			`THE VALUES, WATCHED WHILE IT RAN, inside ${loop.function}():`,
+			'```', rows.join(NL), '```',
+			'These were recorded from the run itself. Quote them; do not invent different ones.', '',
+		);
+	}
+	if (loop.stuck && loop.watched?.length) {
+		parts.push(
+			`The condition reads ${loop.watched.join(', ')}, and NONE of them changed while it was watched,`,
+			'so the condition can never become false. Do not say the program is merely slow.', '',
+		);
+	}
+	if (line) {
+		parts.push(`THE LOOP IS ON LINE ${line}, MARKED > BELOW:`, '```python', numbered(code, line), '```', '');
+	}
+	return parts;
+}
+
 /**
  * Builds the user message. Everything here is fact: the traceback came from
- * Python, the source is what ran, the output is what it printed, and the trace
- * is the path it actually took.
+ * Python, the source is what ran, the output is what it printed (or, for a
+ * LeetCode-style Solution, what each call returned), and the trace is the path
+ * it actually took.
  */
-export function buildPrompt({ code, parsed, stdout, expected, values, trace, problem, question }) {
+export function buildPrompt({
+	code, parsed, stdout, expected, values, trace, problem, question,
+	loop, method, calls, call, returned, failed, difference, caseIndex, inPlace, design, reveal = false,
+}) {
 	const parts = [...problemBlock(problem)];
+	// A design case: the calls that led to the wrong one, and the object between them.
+	const designed = expected !== undefined && !parsed && !loop && design?.first >= 0 ? designStory(design) : undefined;
+	// The call that produced a wrong answer, folded into how its values moved.
+	// A design problem's answer comes from several calls, so it has none.
+	const story = expected !== undefined && !parsed && !loop && !calls?.[0]?.ops
+		? callHistory(trace, { method: call ? method : undefined, caseIndex })
+		: undefined;
+	if (story && inPlace) {
+		story.returned = undefined;   // it returns None; the answer is the argument
+	}
 
 	if (parsed) {
 		parts.push('PYTHON REPORTED THIS ERROR:', '```', parsed.raw, '```', '');
+		if (failed) {
+			parts.push(`IT WAS RUNNING THIS TEST CASE: ${failed}`, '');
+		}
 
 		// The real variables at the moment it failed. This is the difference
 		// between explaining and guessing: without them the model has to
@@ -426,49 +760,64 @@ export function buildPrompt({ code, parsed, stdout, expected, values, trace, pro
 			}
 			parts.push(`THE FAILING LINE IS ${n}, MARKED > BELOW:`, '```python', window.join('\n'), '```', '');
 		}
+	} else if (loop) {
+		parts.push(...loopBlock(code, loop));
 	} else if (expected !== undefined) {
-		// A wrong answer, not a crash. This is the common case in DSA work and
-		// the one a cloud chat gets used for; the model is given both strings so
-		// it compares them rather than reading the whole solution looking for
-		// something to criticise.
-		// Numbered, so the answer can cite a line the way the traceback path does.
-		const numbered = code.split('\n')
-			.map((l, i) => `${String(i + 1).padStart(4)}  ${l}`)
-			.join('\n');
-
+		// A wrong answer, not a crash: the common case in DSA work, and the one
+		// a cloud chat gets used for.
+		//
+		// Short, and nothing but facts. This used to carry the problem
+		// statement, the steps one by one and six lines of instructions, and
+		// the 1.5B named the cause of a reversed answer in 2 answers of 6 -
+		// blaming a correct `columnNumber -= 1` in the rest. Given the two
+		// answers, the code, and how each value moved, and asked to walk
+		// through how the code gets there, it did so correctly in about 6 of 8,
+		// and an off-by-one sum went from 2 of 6 to 5 of 8. Retelling recorded
+		// values is a thing a small model does well; finding a cause is not.
+		parts.length = 0;
+		const got = (call ? returned : (stdout ?? '').trim()) || '(nothing)';
+		const field = (label, text) => (String(text).includes('\n')
+			? [`${label}:`, '```', text, '```']
+			: [`${label}: ${text}`]);
 		parts.push(
-			'The program ran without crashing, but printed the wrong answer.',
+			`A student's code ${call ? 'returned' : 'printed'} the wrong answer.`,
 			'',
-			'EXPECTED:', '```', expected, '```', '',
-			'ACTUALLY PRINTED:', '```', (stdout ?? '').trim() || '(nothing)', '```', '',
-			'SOURCE:', '```python', numbered, '```', '',
+			...(call ? [`THE CALL: ${call}`] : []),
+			...field('EXPECTED', expected),
+			...field(call ? 'RETURNED' : 'PRINTED', got),
+			// A difference worked out by comparing the two, not by the model.
+			...(difference ? [`CHECKED: ${difference}`] : []),
+			'',
+			'THE CODE:', '```python', numbered(code), '```', '',
 		);
 
 		// The run was recorded, so the model does not have to simulate the loop
-		// it is being asked about - which is the step it gets wrong. Nothing
-		// raised here, so there are no crash values; this is all there is.
-		const steps = formatTrace(trace);
-		if (steps) {
+		// it is being asked about - which is the step it gets wrong. One line
+		// per name where the call can be found whole; the raw steps otherwise.
+		const steps = story || designed ? '' : formatTrace(trace);
+		if (designed) {
+			parts.push('RECORDED WHILE IT RAN (each call, what it returned, and the object after it):', ...designed, '');
+		} else if (story) {
+			parts.push('RECORDED WHILE IT RAN (exact values, in order):');
+			for (const [name, seen] of story.names.slice(0, 10)) {
+				parts.push(`  ${name}: ${arrows(seen)}`);
+			}
+			if (story.returned) {
+				const text = (code.split('\n')[story.returned.line - 1] ?? '').trim();
+				parts.push(`Line ${story.returned.line} (${text}) returned ${story.returned.value}.`);
+			}
+			parts.push('');
+		} else if (steps) {
 			parts.push(
 				traceHeading(trace, Math.min(24, trace.steps.length)),
 				'```', steps, '```',
-				'Each step is a line about to run, and the names that changed since the',
-				'step before it. This was recorded from the run. Quote these values; do',
-				'NOT invent a different value for any name that appears here, and do not',
-				'describe a path the program did not take.',
+				'Each step is a line about to run, and the names that changed since the step before it.',
 				'',
 			);
 		}
-
-		parts.push(
-			'The expected output and the test input are both CORRECT. The bug is in the',
-			'logic, so never suggest changing the input or the expected value to match',
-			'what was printed.',
-			'Name the line that actually PRODUCES the wrong value - usually the one',
-			'that returns or prints it - not merely a line involved in the working.',
-			'Trace the real values through the loop to show how that line ends up',
-			'with what was printed.',
-		);
+		// Without this the model "fixes" the test: a 7B once suggested
+		// reordering two_sum's input to match the bug.
+		parts.push('The expected answer and the test input are both correct.', '');
 	} else {
 		parts.push(
 			'The program ran to completion with no error.',
@@ -476,6 +825,9 @@ export function buildPrompt({ code, parsed, stdout, expected, values, trace, pro
 			'',
 			'SOURCE:', '```python', code, '```', '',
 		);
+		if (calls?.length) {
+			parts.push(`WHAT ${method ?? 'THE METHOD'} RETURNED FOR EACH TEST CASE:`, '```', callsBlock(calls), '```', '');
+		}
 	}
 
 	// Not in the expected-output path: that branch has already shown the output,
@@ -499,28 +851,86 @@ export function buildPrompt({ code, parsed, stdout, expected, values, trace, pro
 	// the instruction it reads last.
 	const lastStep = trace?.steps?.slice().reverse()
 		.find(s => s.vars && Object.keys(s.vars).length);
-	const returned = trace?.steps?.slice().reverse().find(s => s.ret !== undefined);
+	const returnStep = trace?.steps?.slice().reverse().find(s => s.ret !== undefined);
 	const traced = lastStep
 		? Object.entries(lastStep.vars).slice(0, 6).map(([k, v]) => `${k} = ${v}`).join(', ')
-			+ (returned ? `, and ${returned.fn}() returned ${returned.ret}` : '')
+			+ (returnStep ? `, and ${returnStep.fn}() returned ${returnStep.ret}` : '')
 		: '';
 
 	const against = (problem ?? '').trim()
 		? ' Answer against the problem statement, not against what the code looks like it is trying to do.'
 		: '';
 
+	const why = text => `${text[0].toUpperCase()}${text.slice(1)}`;
+	// The two answers named in the question itself, where they are short
+	// enough to: a model reads the closing line hardest.
+	const printed = (stdout ?? '').trim();
+	const short = s => s && s.length <= 40 && !s.includes('\n');
+	const whyWrong = call
+		? `why does ${call} return ${returned} instead of ${expected}?`
+		: short(printed) && short(String(expected ?? ''))
+			? `why does it print ${printed} instead of ${expected}?`
+			: 'why is the output different from what I expected?';
+	const differs = difference ? `${difference} ${why(whyWrong)}` : whyWrong;
+	// The teaching close for a wrong answer: walk through it, then one question.
+	// Show the fix asks the plain question instead, and gets the corrected line.
+	const gotText = (call ? returned : printed) || '(nothing)';
+	const ends = short(String(gotText)) && short(String(expected ?? ''))
+		? `${gotText} instead of ${expected}`
+		: 'that output instead of the expected one';
+	const walkThrough = `${story || designed || traced ? 'Using only these recorded values, explain' : 'Explain'} step by step how the code `
+		+ `ends up with ${ends}. Then ask the student one question that points at the cause. Do not say how to fix it.`;
+	const stuckOn = loop?.stuck && loop.watched?.length
+		? `${loop.watched.map(n => `${n} = ${loop.locals?.[n]}`).join(', ')} never changed. `
+		: '';
+
 	const fallback = parsed
 		? (recorded
 			? `The recorded values were: ${recorded}. Using those exact numbers, what went wrong and why?`
 			: 'What is going wrong here, and why?')
-		: expected !== undefined
-			? (traced
-				? `By line ${lastStep.line} the recorded values were: ${traced}. Using the recorded steps, not your own reconstruction, why is the output different from what I expected?${against}`
-				: `Why is the output different from what I expected?${against}`)
-			: `Is this output correct?${against}`;
+		: loop
+			? (loop.stuck
+				? `${stuckOn}Why does the loop on line ${loop.loop?.line ?? loop.line} never end?`
+				: `Why has this not finished after ${loop.seconds} seconds?${against}`)
+			: expected !== undefined
+				? (reveal ? why(differs) : walkThrough)
+				: `${calls?.length ? 'Are these answers correct?' : 'Is this output correct?'}${against}`;
 
 	parts.push(question || fallback);
 	return parts.join('\n');
+}
+
+/**
+ * The automatic explanation's request, and how its answer is cleaned.
+ *
+ * In one place so the app and the measurements behind these prompts send the
+ * same thing. `reveal` is Show the fix: its own prompt, and nothing removed.
+ *
+ * @returns {{ messages: Array<{role: string, content: string}>, clean: (text: string) => string, closing: string }}
+ */
+export function buildTeaching(facts, { reveal = false } = {}) {
+	const user = buildPrompt({ ...facts, reveal });
+	const closing = user.split(NL).pop();
+	// A wrong answer's request ends on its own instruction - walk through it,
+	// then ask - and was measured that way; the rules block stays with crashes
+	// and loops, where it was measured.
+	const wrongAnswer = facts.expected !== undefined && !facts.parsed && !facts.loop;
+	return {
+		messages: [
+			{ role: 'system', content: reveal ? SYSTEM_PROMPT_REVEAL : SYSTEM_PROMPT },
+			// One worked example, for a crash only: a small model copies its
+			// shape - and its content. Beside a wrong answer the 1.5B invented
+			// the example's IndexError in 4 answers of 12.
+			...(reveal || !facts.parsed ? [] : TEACHING_EXAMPLE),
+			{ role: 'user', content: user + (reveal || wrongAnswer ? '' : TEACHING_RULES) },
+		],
+		// The teaching answer never shows the fix, whatever the model wrote;
+		// Show the fix is where the fix lives.
+		clean: reveal
+			? stripReasoning
+			: text => teachingOnly(stripReasoning(text), { code: facts.code, closing }),
+		closing,
+	};
 }
 
 /*
@@ -892,13 +1302,13 @@ export const SYSTEM_PROMPT_OPTIMISE = [
  * The selection is what makes this useful: "why is this O(n^2)" means nothing
  * without knowing which part "this" is.
  */
-export function buildAskPrompt({ code, selection, question, parsed, expected, stdout, values, trace, problem }) {
+export function buildAskPrompt({
+	code, selection, question, parsed, expected, stdout, values, trace, problem,
+	loop, method, calls, call, returned, failed, difference,
+}) {
 	const parts = [...problemBlock(problem)];
 
-	const numbered = code.split('\n')
-		.map((l, i) => `${String(i + 1).padStart(4)}  ${l}`)
-		.join('\n');
-	parts.push('THEIR CODE:', '```python', numbered, '```', '');
+	parts.push('THEIR CODE:', '```python', numbered(code), '```', '');
 
 	if (selection && selection.trim()) {
 		parts.push(
@@ -910,15 +1320,36 @@ export function buildAskPrompt({ code, selection, question, parsed, expected, st
 	// Whatever the last run showed is still the context they are sitting in.
 	if (parsed) {
 		parts.push('THE LAST RUN FAILED WITH:', '```', parsed.raw, '```', '');
+		if (failed) {
+			parts.push(`WHILE RUNNING THIS TEST CASE: ${failed}`, '');
+		}
 		if (values?.locals && Object.keys(values.locals).length) {
 			const rows = Object.entries(values.locals).map(([k, v]) => `  ${k} = ${v}`);
 			parts.push(`ACTUAL VALUES AT THE FAILURE, inside ${values.function}():`, '```', rows.join(NL), '```', '');
 		}
+	} else if (loop) {
+		const where = loop.loop;
+		const unchanged = (loop.watched ?? []).map(n => `${n} = ${loop.locals?.[n]}`).join(', ');
+		parts.push(
+			`THE LAST RUN NEVER FINISHED: it was stopped after ${loop.seconds}s`
+			+ (where ? ` in the ${where.kind} loop on line ${where.line} (${where.condition})` : '')
+			+ (loop.case ? `, running ${loop.case}` : '') + '.',
+			...(loop.stuck && unchanged ? [`The loop's condition can never change: ${unchanged} stayed the same the whole time.`] : []),
+			'',
+		);
+	} else if (expected !== undefined && call) {
+		parts.push(
+			`IN THE LAST RUN, ${call} RETURNED ${returned}`,
+			`BUT ${expected} WAS EXPECTED.`,
+			...(difference ? [`WHAT IS DIFFERENT, CHECKED: ${difference}`] : []), '',
+		);
 	} else if (expected !== undefined) {
 		parts.push(
 			`THE LAST RUN PRINTED ${JSON.stringify((stdout ?? '').trim())}`,
 			`BUT ${JSON.stringify(expected)} WAS EXPECTED.`, '',
 		);
+	} else if (calls?.length) {
+		parts.push(`IN THE LAST RUN, ${method ?? 'THE METHOD'} RETURNED:`, '```', callsBlock(calls), '```', '');
 	} else if (stdout && stdout.trim()) {
 		parts.push('THE LAST RUN PRINTED:', '```', stdout.trim().slice(0, 1000), '```', '');
 	}

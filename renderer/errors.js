@@ -133,8 +133,11 @@ export function describe(parsed) {
  * The one-line hint shown inline next to the code. Covers the mistakes a
  * beginner actually makes; anything else falls back to Python's own wording,
  * which is already decent in 3.11+.
+ *
+ * @param {{ input?: string }} [context] What the run was given: `input` is the
+ *        Input box, which is what a script's input() reads.
  */
-export function hintFor(parsed) {
+export function hintFor(parsed, { input = '' } = {}) {
 	if (!parsed) {
 		return '';
 	}
@@ -163,7 +166,10 @@ export function hintFor(parsed) {
 		case 'ValueError':
 			return 'The value is the right type but not an acceptable value.';
 		case 'EOFError':
-			return 'The program asked for input(), and there is nowhere to type it here. Put the test values in the code instead.';
+			// The Input box is the program's stdin, read a line per input() call.
+			return input.trim()
+				? 'input() was called more times than Input has lines - each call reads the next line.'
+				: 'The program asked for input(). Put what it should read in Test cases, under Input - a line per call.';
 		default:
 			return m;
 	}

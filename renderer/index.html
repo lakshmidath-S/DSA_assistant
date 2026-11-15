@@ -46,22 +46,11 @@
 	</header>
 
 	<main>
-		<!-- The student's side: what they are solving, their code, and what it
-		     printed against what it should have printed - in reading order. -->
+		<!-- The student's side: the code, and under it one panel for everything
+		     around the code - what it printed, what it is tested with, and the
+		     problem it is meant to solve. One of those at a time, so the code
+		     keeps the room. -->
 		<section class="work">
-			<!-- Above the code rather than tucked under the answers: a problem
-			     statement left over from yesterday skews every answer, and here it
-			     is in plain sight. -->
-			<section class="drawer problem-drawer">
-				<button id="problem-toggle" class="drawer-head" aria-expanded="false">
-					<span class="chev" aria-hidden="true">&#9656;</span>
-					<span class="drawer-title">Problem</span>
-					<span class="opt">optional · paste the question so answers are judged against it</span>
-				</button>
-				<textarea id="problem" class="drawer-box" hidden rows="4"
-					placeholder="Paste the question you are solving.&#10;Without it, an explanation can only guess at what the code was meant to do."></textarea>
-			</section>
-
 			<section class="editor-pane">
 				<div id="editor"></div>
 				<div id="empty" class="empty" hidden>
@@ -75,23 +64,46 @@
 				</div>
 			</section>
 
-			<!-- Side by side, because comparing them is the whole job. -->
-			<section class="console">
-				<section class="out-pane">
-					<div class="pane-head"><span class="pane-title">Output</span></div>
-					<pre id="out" class="out"></pre>
-					<p id="out-empty" class="out-empty">Whatever your program prints will appear here.</p>
-				</section>
+			<div id="hsplit" class="hsplit" title="Drag to resize" aria-hidden="true"></div>
 
-				<section class="drawer expect-drawer">
-					<button id="expect-toggle" class="drawer-head" aria-expanded="false">
-						<span class="chev" aria-hidden="true">&#9656;</span>
-						<span class="drawer-title">Expected output</span>
-						<span class="opt">optional</span>
+			<section class="panel">
+				<div class="tabs" role="tablist" aria-label="Around the code">
+					<button id="tab-output" class="tab" role="tab" aria-selected="true" aria-controls="panel-output">Output</button>
+					<button id="tab-tests" class="tab" role="tab" aria-selected="false" aria-controls="panel-tests" tabindex="-1">
+						Test cases<span class="tab-dot" aria-hidden="true"></span>
 					</button>
-					<textarea id="expect" class="drawer-box" hidden rows="3"
-						placeholder="Paste what the correct answer should print.&#10;Each run is checked against it."></textarea>
-				</section>
+					<button id="tab-problem" class="tab" role="tab" aria-selected="false" aria-controls="panel-problem" tabindex="-1">
+						Problem<span class="tab-dot" aria-hidden="true"></span>
+					</button>
+				</div>
+
+				<div id="panel-output" class="tab-panel out-panel" role="tabpanel" aria-labelledby="tab-output">
+					<!-- What a class Solution returned, one row per test case. It
+					     prints nothing, so without this a correct answer and no
+					     answer at all would look the same. -->
+					<ol id="returns" class="returns" hidden></ol>
+					<pre id="out" class="out"></pre>
+					<p id="out-empty" class="out-empty">What your program prints, or a Solution returns, shows up here.</p>
+				</div>
+
+				<!-- What goes in, beside what should come out: they are read as pairs. -->
+				<div id="panel-tests" class="tab-panel tests-panel" role="tabpanel" aria-labelledby="tab-tests" hidden>
+					<label class="field">
+						<span class="field-label">Input</span>
+						<textarea id="input" class="field-box" spellcheck="false"
+							placeholder="columnNumber = 28&#10;&#10;A class Solution: one case per line, as LeetCode writes it. A design class: the operations on one line, their arguments on the next. Left empty, the examples in Problem are run.&#10;&#10;A script: what input() reads, a line per call."></textarea>
+					</label>
+					<label class="field">
+						<span class="field-label">Expected</span>
+						<textarea id="expect" class="field-box" spellcheck="false"
+							placeholder="&quot;AB&quot;&#10;&#10;What each case should return, one per line - or what a script should print."></textarea>
+					</label>
+				</div>
+
+				<div id="panel-problem" class="tab-panel problem-panel" role="tabpanel" aria-labelledby="tab-problem" hidden>
+					<textarea id="problem" class="field-box" aria-label="Problem"
+						placeholder="Paste the problem you are solving.&#10;&#10;Explanations are judged against it, and a class Solution runs its examples."></textarea>
+				</div>
 			</section>
 		</section>
 
@@ -111,7 +123,8 @@
 
 				<!-- A wrong answer is not a crash, and needs its own card. -->
 				<section id="diff-card" class="card wrong" hidden>
-					<div class="card-head"><h2 class="err-type wrong">Wrong answer</h2></div>
+					<h2 class="verdict wrong">Wrong answer</h2>
+					<p id="diff-case" class="where" hidden></p>
 					<div class="diff">
 						<div class="diff-col">
 							<span class="diff-label">Expected</span>
@@ -122,39 +135,43 @@
 							<pre id="diff-got" class="diff-text bad"></pre>
 						</div>
 					</div>
+					<p id="diff-fact" class="hint" hidden></p>
 					<div id="diff-explain" class="explain"></div>
 					<div class="card-foot">
-						<button id="diff-ask" class="ghost small">Explain again</button>
-						<button id="diff-reveal" class="ghost small quiet">Show the fix</button>
+						<button id="diff-ask" class="act">Explain again</button>
+						<button id="diff-reveal" class="act quiet">Show the fix</button>
 						<span id="diff-meta" class="meta"></span>
 					</div>
 				</section>
 
 				<!-- The error card. One problem, pointed at, explained. -->
 				<section id="card" class="card crash" hidden>
-					<div class="card-head">
-						<h2 id="err-type" class="err-type"></h2>
-						<button id="jump" class="link">Go to line</button>
-					</div>
+					<h2 id="err-type" class="verdict"></h2>
 					<p id="err-msg" class="err-msg"></p>
+					<!-- Where, as a sentence: "On line 4, in show_all()". The line
+					     number is the way back to it. -->
+					<p id="err-where" class="where" hidden></p>
 					<p id="err-hint" class="hint"></p>
-					<pre id="err-line" class="err-line"></pre>
 					<div id="values" class="values" hidden>
-						<span class="values-head">Values at that moment</span>
+						<span id="values-head" class="values-head">Values at that moment</span>
 						<table id="values-rows" class="values-rows"></table>
 					</div>
 					<div id="explain" class="explain"></div>
 					<div class="card-foot">
-						<button id="ask" class="ghost small">Explain again</button>
-						<button id="reveal" class="ghost small quiet">Show the fix</button>
+						<button id="ask" class="act">Explain again</button>
+						<button id="reveal" class="act quiet">Show the fix</button>
 						<span id="ai-meta" class="meta"></span>
 					</div>
 				</section>
 
 				<section id="ok-card" class="card ok" hidden>
-					<div class="card-head"><h2 id="ok-title" class="err-type ok">Ran cleanly</h2></div>
+					<h2 id="ok-title" class="verdict ok">Ran cleanly</h2>
 					<p id="ok-meta" class="hint"></p>
-					<pre id="ok-out" class="err-line" hidden></pre>
+					<!-- One thing to do about it, when there is one: clearing a
+					     Problem left over from an earlier exercise. -->
+					<div id="ok-foot" class="card-foot" hidden>
+						<button id="ok-act" class="act"></button>
+					</div>
 				</section>
 
 				<!-- The run went somewhere whether or not it crashed. Dragging the
@@ -179,11 +196,13 @@
 				</section>
 
 				<div id="thread" class="thread"></div>
+				<button id="thread-clear" class="act quiet thread-clear">Clear these notes</button>
 
-				<p id="side-empty" class="side-empty">
-					Run your code. If it crashes or prints the wrong thing, the reason
-					appears here - explained, not fixed for you.
-				</p>
+				<div id="side-empty" class="side-empty">
+					<p class="side-empty-title">Run your code.</p>
+					<p>If it crashes, gives the wrong answer or never finishes, the reason
+						appears here - explained, not fixed for you.</p>
+				</div>
 			</div>
 
 			<!-- Ask bar. A question box that knows what you have selected, plus the
@@ -200,10 +219,8 @@
 					<button id="ask-send" class="ask-send" title="Ask (Enter)">Ask</button>
 				</div>
 				<div class="ask-quick">
-					<button id="ask-complexity" class="chip">Time &amp; space</button>
-					<button id="ask-optimise" class="chip">Can it be faster?</button>
-					<span class="spacer"></span>
-					<button id="thread-clear" class="link">Clear notes</button>
+					<button id="ask-complexity" class="act">Time &amp; space</button>
+					<button id="ask-optimise" class="act">Can it be faster?</button>
 				</div>
 			</section>
 		</aside>

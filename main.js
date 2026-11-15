@@ -20,12 +20,23 @@ const net = require('node:net');
 const path = require('node:path');
 const os = require('node:os');
 
+// A test run of the real app gets a throwaway profile: it must not overwrite
+// the user's session, and with its own profile it is not turned away by the
+// single-instance lock when the user already has the app open. Development
+// only, and before anything below reads the path.
+if (process.env.STUDIO_USERDATA && !app.isPackaged) {
+	app.setPath('userData', process.env.STUDIO_USERDATA);
+}
+
 /** Where the last session is kept, so a restart does not lose work. */
 const STATE_DIR = path.join(app.getPath('userData'), 'session');
 const STATE_FILE = path.join(STATE_DIR, 'last.json');
 
 /** The file Python actually runs. Kept on disk so tracebacks have a real path. */
 const SCRATCH_FILE = path.join(STATE_DIR, 'main.py');
+
+/** The Input box, handed to the harness for a LeetCode-style `class Solution`. */
+const CASES_FILE = path.join(STATE_DIR, 'cases.json');
 
 /**
  * Runs the file, records the variables at a failure, and traces the path it
@@ -55,7 +66,18 @@ const SPEECH_PORT = 8756;
  */
 const VALUES_MARKER = '__MYIDE_VALUES__';
 const TRACE_MARKER = '__MYIDE_TRACE__';
-const MARKERS = [VALUES_MARKER, TRACE_MARKER];
+/** What a LeetCode-style Solution returned for each test case. */
+const RESULT_MARKER = '__MYIDE_RESULT__';
+/** Where a run that would not end was stuck, reported by the harness's watchdog. */
+const LOOP_MARKER = '__MYIDE_LOOP__';
+const MARKERS = [VALUES_MARKER, TRACE_MARKER, RESULT_MARKER, LOOP_MARKER];
+/** The field of the run's result each marker's payload lands in. */
+const MARKER_FIELDS = {
+	[VALUES_MARKER]: 'values',
+	[TRACE_MARKER]: 'trace',
+	[RESULT_MARKER]: 'solution',
+	[LOOP_MARKER]: 'loop',
+};
 
 const isMarker = line => MARKERS.some(m => line.startsWith(m));
 
@@ -298,6 +320,15 @@ function killCurrent() {
 /** Runs ended by the Stop button, so the result can say so instead of "no errors". */
 const stoppedRuns = new WeakSet();
 
+/**
+ * Numbers each run, and every chunk of output it streams. The result and the
+ * chunks reach the window as separate messages, and a chunk can arrive after
+ * the result has already been drawn - where it used to trigger the streaming
+ * size cap and throw away the full output it landed on. With the number, the
+ * window drops anything from a run it has finished drawing.
+ */
+let runCounter = 0;
+
 // --- session ------------------------------------------------------------------
 // Kept deliberately small: the code, and where the caret was. No workspace, no
 // window layout, no list of open editors - there is only ever one file.
@@ -391,41 +422,38 @@ async function resolvePython() {
  * text as a traceback, and the output panel shows it verbatim.
  */
 function extractMarkers(stderr) {
+	const found = { text: stderr };
 	if (!MARKERS.some(m => stderr.includes(m))) {
-		return { values: undefined, trace: undefined, text: stderr };
+		return found;
 	}
 
-	let values;
-	let trace;
 	const kept = [];
 	for (const line of stderr.split(NEWLINE)) {
-		if (!isMarker(line)) {
+		const marker = MARKERS.find(m => line.startsWith(m));
+		if (!marker) {
 			kept.push(line);
 			continue;
 		}
-		const [marker, target] = line.startsWith(VALUES_MARKER)
-			? [VALUES_MARKER, 'values']
-			: [TRACE_MARKER, 'trace'];
 		try {
-			const parsed = JSON.parse(line.slice(marker.length));
-			if (target === 'values') {
-				values = parsed;
-			} else {
-				trace = parsed;
-			}
+			found[MARKER_FIELDS[marker]] = JSON.parse(line.slice(marker.length));
 		} catch {
 			// A line truncated by the output cap is not worth failing the run over.
 		}
 	}
 
-	return { values, trace, text: kept.join(NEWLINE) };
+	found.text = kept.join(NEWLINE);
+	return found;
 }
 
-ipcMain.handle('run:start', async (_event, code) => {
+ipcMain.handle('run:start', async (_event, code, input, stdin) => {
 	killCurrent();
+	const runId = ++runCounter;
 
 	await fs.mkdir(STATE_DIR, { recursive: true });
 	await fs.writeFile(SCRATCH_FILE, typeof code === 'string' ? code : '', 'utf8');
+	// The test cases, for a LeetCode-style Solution. Written by this process,
+	// read by the harness: the child only ever reads from the data directory.
+	await fs.writeFile(CASES_FILE, JSON.stringify({ input: typeof input === 'string' ? input : '' }), 'utf8');
 
 	const python = await resolvePython();
 	if (!python) {
@@ -449,7 +477,7 @@ ipcMain.handle('run:start', async (_event, code) => {
 
 		let child;
 		try {
-			child = spawn(cmd, [...args, '-X', 'utf8', '-u', HARNESS, SCRATCH_FILE], {
+			child = spawn(cmd, [...args, '-X', 'utf8', '-u', HARNESS, SCRATCH_FILE, CASES_FILE], {
 				cwd: STATE_DIR,
 				windowsHide: true,
 				env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
@@ -461,11 +489,14 @@ ipcMain.handle('run:start', async (_event, code) => {
 
 		current = child;
 
-		// Nothing will ever be typed into it. Left open, input() waited out
-		// the whole time limit and was then reported as a loop that never
-		// ends; closed, it fails at once with an EOFError on the right line.
+		// The Input box, as typed, is what input() reads - a competitive-
+		// programming answer reads its case from stdin - and then it is
+		// closed. Nothing is ever typed into it live: left open, input()
+		// waited out the whole time limit and was then reported as a loop
+		// that never ends. Closed, asking for one line too many fails at once
+		// with an EOFError on the right line.
 		child.stdin.on('error', () => { /* the program may exit before this lands */ });
-		child.stdin.end();
+		child.stdin.end(typeof stdin === 'string' ? stdin : '');
 
 		const timer = setTimeout(() => {
 			timedOut = true;
@@ -486,7 +517,7 @@ ipcMain.handle('run:start', async (_event, code) => {
 			// Stream it so long-running programs show progress rather than
 			// appearing frozen until they exit.
 			if (bucket !== 'err') {
-				win?.webContents.send('run:data', { bucket, text });
+				win?.webContents.send('run:data', { bucket, text, run: runId });
 				return;
 			}
 			errTail += text;
@@ -494,7 +525,7 @@ ipcMain.handle('run:start', async (_event, code) => {
 			errTail = parts.pop() ?? '';
 			const shown = parts.filter(l => !isMarker(l));
 			if (shown.length) {
-				win?.webContents.send('run:data', { bucket, text: shown.join(NEWLINE) + NEWLINE });
+				win?.webContents.send('run:data', { bucket, text: shown.join(NEWLINE) + NEWLINE, run: runId });
 			}
 		};
 
@@ -527,11 +558,15 @@ ipcMain.handle('run:start', async (_event, code) => {
 			// What the variables actually held when it failed, and the path the
 			// run took. Values are absent for a clean run and for a SyntaxError;
 			// a trace is absent only for a SyntaxError, where nothing executed.
-			const { values, trace, text: cleanStderr } = extractMarkers(stderr);
+			// `solution` is what a Solution returned per case, and `loop` where a
+			// run that would not end was stuck.
+			const { values, trace, solution, loop, text: cleanStderr } = extractMarkers(stderr);
 
 			resolve({
 				values,
 				trace,
+				solution,
+				loop,
 				ok: exitCode === 0 && !timedOut,
 				stdout,
 				stderr: timedOut
@@ -542,6 +577,7 @@ ipcMain.handle('run:start', async (_event, code) => {
 				file: SCRATCH_FILE,
 				timedOut,
 				stopped: stoppedRuns.has(child),
+				run: runId,
 			});
 		});
 	});

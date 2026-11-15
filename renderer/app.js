@@ -11,14 +11,16 @@
 
 import { parseTraceback, describe, hintFor } from './errors.js';
 import {
-	PROVIDERS, pickDefaultServer, buildPrompt, chat, stripReasoning,
-	SYSTEM_PROMPT, SYSTEM_PROMPT_REVEAL, SYSTEM_PROMPT_ASK,
-	SYSTEM_PROMPT_COMPLEXITY, SYSTEM_PROMPT_OPTIMISE, buildAskPrompt,
-	warmModel, modelThinks, TEACHING_EXAMPLE, TEACHING_RULES, withoutCode,
+	PROVIDERS, pickDefaultServer, buildTeaching, chat, stripReasoning,
+	SYSTEM_PROMPT_ASK, SYSTEM_PROMPT_COMPLEXITY, SYSTEM_PROMPT_OPTIMISE, buildAskPrompt,
+	warmModel, modelThinks,
 } from './ai.js';
 import { Voice } from './voice.js';
 import { render, escapeHtml } from './markdown.js';
 import { probe, isReady, pullModel, waitForProviders, SUGGESTED, pythonHelp, formatBytes } from './setup.js';
+import {
+	planRun, judge, anyOrderIn, argumentsOf, differenceOf, designSteps, designFact, callOf,
+} from './cases.js';
 
 /** Blank, deliberately. The empty-state hint carries the guidance instead. */
 const STARTER = '';
@@ -28,16 +30,19 @@ const $ = id => document.getElementById(id);
 const els = {
 	run: $('run'), stop: $('stop'), status: $('status'), mic: $('mic'),
 	out: $('out'), card: $('card'), okCard: $('ok-card'), okMeta: $('ok-meta'), okTitle: $('ok-title'),
-	errType: $('err-type'), errMsg: $('err-msg'), errHint: $('err-hint'), errLine: $('err-line'),
-	explain: $('explain'), ask: $('ask'), aiMeta: $('ai-meta'), jump: $('jump'),
+	okFoot: $('ok-foot'), okAct: $('ok-act'),
+	errType: $('err-type'), errMsg: $('err-msg'), errHint: $('err-hint'), errWhere: $('err-where'),
+	explain: $('explain'), ask: $('ask'), aiMeta: $('ai-meta'),
 	overlay: $('voice-overlay'), wave: $('wave'), voiceState: $('voice-state'),
-	empty: $('empty'), okOut: $('ok-out'),
-	splitter: $('splitter'), outEmpty: $('out-empty'),
+	empty: $('empty'),
+	splitter: $('splitter'), hsplit: $('hsplit'), outEmpty: $('out-empty'),
+	tabs: [...document.querySelectorAll('.tabs [role="tab"]')],
 	setup: $('setup'), setupSteps: $('setup-steps'), setupRecheck: $('setup-recheck'),
 	setupBanner: $('setup-banner'), setupBannerNote: $('setup-banner-note'),
 	diffCard: $('diff-card'), diffWant: $('diff-want'), diffGot: $('diff-got'),
 	diffExplain: $('diff-explain'), diffAsk: $('diff-ask'), diffMeta: $('diff-meta'),
-	expect: $('expect'), expectToggle: $('expect-toggle'),
+	expect: $('expect'), input: $('input'), returns: $('returns'),
+	diffCase: $('diff-case'), diffFact: $('diff-fact'), valuesHead: $('values-head'),
 	reveal: $('reveal'), diffReveal: $('diff-reveal'),
 	thread: $('thread'), askInput: $('ask-input'), askSend: $('ask-send'),
 	askComplexity: $('ask-complexity'), askOptimise: $('ask-optimise'),
@@ -47,7 +52,7 @@ const els = {
 	settingsOpen: $('settings-open'), settingsClose: $('settings-close'),
 	settings: $('settings'), settingsServers: $('settings-servers'),
 	modelLabel: $('model-label'),
-	problem: $('problem'), problemToggle: $('problem-toggle'),
+	problem: $('problem'),
 	traceCard: $('trace-card'), traceToggle: $('trace-toggle'), traceBody: $('trace-body'),
 	traceCount: $('trace-count'), traceScrub: $('trace-scrub'), tracePrev: $('trace-prev'),
 	traceNext: $('trace-next'), traceWhere: $('trace-where'), traceVars: $('trace-vars'),
@@ -171,8 +176,9 @@ window.monacoLoaded.then(async () => {
 	editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, run);
 
 	watchSelections();
-	rememberBox(els.problem, els.problemToggle, 'problem');
-	rememberBox(els.expect, els.expectToggle, 'expected');
+	rememberText(els.problem, 'problem');
+	rememberText(els.expect, 'expected');
+	rememberText(els.input, 'input');
 	restoreThread();
 	await bootModels();
 });
@@ -204,6 +210,7 @@ function tidy(text) {
 /** Redraws the output panel from the finished run, tidied. */
 function paintOutput(result) {
 	discardStream();
+	finishedRun = Math.max(finishedRun, result.run ?? 0);
 	els.out.textContent = '';
 	const out = (result.stdout ?? '').trim();
 	const err = tidy(result.stderr ?? '').trim();
@@ -212,9 +219,19 @@ function paintOutput(result) {
 		els.out.appendChild(document.createTextNode(err ? `${out}\n\n` : out));
 	}
 	if (err) {
+		// A traceback's frames are the route to the error, and its last line is
+		// the error: only that line is set in the error colour.
+		const traceback = /^Traceback \(most recent call last\):/m.test(err);
+		const cut = traceback ? err.lastIndexOf('\n') + 1 : 0;
+		if (cut) {
+			const route = document.createElement('span');
+			route.className = 'stderr-route';
+			route.textContent = err.slice(0, cut);
+			els.out.appendChild(route);
+		}
 		const span = document.createElement('span');
 		span.className = 'stderr';
-		span.textContent = err;
+		span.textContent = err.slice(cut);
 		els.out.appendChild(span);
 	}
 	els.outEmpty.hidden = Boolean(out || err);
@@ -260,6 +277,13 @@ const STREAM_KEEP = 100_000;
 let streamQueue = [];
 let streamTimer;
 
+/**
+ * The newest run whose output has been drawn in full. A chunk can arrive after
+ * its run's result, and drawing it then tripped the cap above and threw away
+ * the complete output it landed on - 20,000 lines printed, the last 2,000 shown.
+ */
+let finishedRun = 0;
+
 function flushStream() {
 	streamTimer = undefined;
 	if (!streamQueue.length) {
@@ -294,7 +318,10 @@ function discardStream() {
 	streamQueue = [];
 }
 
-window.studio.onRunData(({ bucket, text }) => {
+window.studio.onRunData(({ bucket, text, run }) => {
+	if (run <= finishedRun) {
+		return;
+	}
 	streamQueue.push({ bucket, text });
 	streamTimer ??= setTimeout(flushStream, 50);
 });
@@ -312,12 +339,17 @@ async function run() {
 	}
 	const mine = ++runSeq;
 	explaining?.stop();
+	// What it prints or returns is what is worth seeing next.
+	selectTab('output');
 	decorations.clear();
 	traceDecorations.clear();
 	discardStream();
 	els.out.textContent = '';
+	els.returns.textContent = '';
+	els.returns.hidden = true;
 	els.card.hidden = true;
 	els.okCard.hidden = true;
+	setOkAction();
 	els.diffCard.hidden = true;
 	els.traceCard.hidden = true;
 	els.explain.innerHTML = '';
@@ -330,18 +362,25 @@ async function run() {
 	els.status.textContent = 'Running…';
 
 	const code = editor.getValue();
-	const result = await window.studio.run(code);
+	// A class Solution or a design class prints nothing: it is called on test
+	// cases, and what it returns is the answer. The cases are worked out here,
+	// where the boxes are; the Input box as typed goes along as well, as what a
+	// script's input() reads. Which the file is, the harness decides.
+	const plan = planRun({ input: els.input.value, expected: els.expect.value, problem: els.problem.value });
+	const result = await window.studio.run(code, plan.input, els.input.value);
 	if (mine !== runSeq) {
+		// Replaced by a newer run; whatever it still streams is not wanted.
+		finishedRun = Math.max(finishedRun, result.run ?? 0);
 		return;
 	}
 
 	els.run.disabled = false;
 	els.stop.hidden = true;
-	els.status.textContent = result.stopped
+	els.status.textContent = result.stopped || result.loop
 		? `Stopped after ${(result.ms / 1000).toFixed(1)}s`
 		: `Ran in ${(result.ms / 1000).toFixed(1)}s`;
 
-	lastRun = { ...result, code };
+	lastRun = { ...result, code, plan };
 
 	// Stopped on purpose: nothing went wrong, and nothing ran to the end to be
 	// judged. What it printed so far is in Output; that is all there is to say.
@@ -368,9 +407,29 @@ async function run() {
 	// or looked fine.
 	showTrace(result.trace);
 
+	// What each test case returned, judged against what it should have, where
+	// that is known. Listed whatever happens next: the cases that finished
+	// before a crash or a stuck loop still have their answers.
+	const sol = result.solution;
+	lastRun.cases = sol?.cases
+		? judge(sol.cases, plan?.expectations, { anyOrder: anyOrderIn(els.problem.value) })
+		: [];
+	showReturns(sol, lastRun.cases, result.loop);
+
+	// A run that would not end has no traceback, only where it was stuck.
+	if (result.loop) {
+		showLoop(result.loop, code);
+		return;
+	}
+
 	const parsed = parseTraceback(result.stderr, scratchPath || result.file);
 	if (parsed) {
 		showError(parsed, code);
+		return;
+	}
+
+	if (sol) {
+		showSolution(result, sol, lastRun.cases, plan);
 		return;
 	}
 
@@ -395,23 +454,29 @@ function showError(parsed, code) {
 	// Python's own message under it.
 	els.errType.textContent = parsed.type;
 	els.errMsg.textContent = parsed.message ?? '';
-	els.errHint.textContent = hintFor(parsed);
+	els.errHint.textContent = hintFor(parsed, { input: els.input.value });
 
 	// A traceback can name a line this buffer does not have - a frame from
 	// another file, or a stale run against code that has since been edited down.
 	// Monaco throws "Illegal value for lineNumber" on those, which kills the rest
 	// of showError and leaves the panel half-drawn, so the error still gets
 	// reported but nothing is marked.
-	const lineCount = editor.getModel().getLineCount();
-	const line = parsed.primary?.line;
-	if (line && line >= 1 && line <= lineCount) {
-		const text = code.split('\n')[line - 1] ?? '';
-		els.errLine.textContent = `${line}  ${text.trim()}`;
-		markLine(parsed, text);
+	const line = inBuffer(parsed.primary?.line);
+	if (line) {
+		markLine(parsed, code.split('\n')[line - 1] ?? '');
 		editor.revealLineInCenterIfOutsideViewport(line, monaco.editor.ScrollType.Smooth);
-	} else {
-		els.errLine.textContent = '';
 	}
+	// Raised inside a Solution: which test case it was given. And the function
+	// is the nearest one the student named: "<genexpr>" is Python's word for
+	// the expression on that line, not theirs.
+	const failed = lastRun.solution?.failed;
+	const at = designAt(failed);
+	showWhere(els.errWhere, {
+		line,
+		fn: parsed.frames.filter(f => f.isUser && !f.func.startsWith('<')).pop()?.func,
+		call: failed && !at ? callLabel(failed, lastRun.solution.method) : undefined,
+		at,
+	});
 
 	lastRun.parsed = parsed;
 	showValues(lastRun.values);
@@ -430,20 +495,428 @@ function showClean(result, matchedExpected) {
 
 	const printed = (result.stdout ?? '').trim();
 	// A run that hit the time limit did not run cleanly; it did not finish.
+	els.okCard.classList.remove('asking');
 	els.okCard.classList.toggle('stalled', Boolean(result.timedOut));
-	els.okTitle.textContent = result.timedOut ? 'Did not finish' : 'Ran cleanly';
+	els.okTitle.textContent = result.timedOut ? 'Did not finish'
+		: matchedExpected ? 'Matches' : 'Ran cleanly';
+	// What it printed is in Output, under the code; saying it again here is
+	// the kind of repetition that made this side crowded.
 	if (result.timedOut) {
 		els.okMeta.textContent = 'Stopped after 15 seconds. Is there a loop that never ends, or is it waiting for input()?';
 	} else if (matchedExpected) {
-		els.okMeta.textContent = `Output matches what you expected (${(result.ms / 1000).toFixed(1)}s).`;
+		els.okMeta.textContent = 'What it printed is exactly what you expected.';
 	} else if (printed) {
-		els.okMeta.textContent = `No errors. It printed this in ${(result.ms / 1000).toFixed(1)}s:`;
+		els.okMeta.textContent = 'No errors. What it printed is in Output, under the code.';
 	} else {
-		els.okMeta.textContent = `No errors, and it printed nothing (${(result.ms / 1000).toFixed(1)}s).`;
+		els.okMeta.textContent = 'No errors, and it printed nothing.';
+	}
+}
+
+// --- a LeetCode-style Solution ------------------------------------------------
+// It prints nothing; it is called. The harness calls the method on each test
+// case and reports what came back, and that is the output worth showing.
+
+/** A case's arguments, or the bare call when the method takes none. A design case's label is already its calls. */
+function callLabel(call, method) {
+	if (lastRun?.solution?.kind === 'design') {
+		return String(call ?? '');
+	}
+	return argumentsOf(call, method) || `${method}()`;
+}
+
+/** "top(), operation 4 of 4" - where the harness says a design case was - taken apart. */
+function designAt(text) {
+	const m = /^(.*), operation (\d+) of (\d+)$/.exec(String(text ?? ''));
+	return m ? { call: m[1], n: Number(m[2]), total: Number(m[3]) } : undefined;
+}
+
+/** A line number this buffer has, or undefined. */
+function inBuffer(line) {
+	return line >= 1 && line <= editor.getModel().getLineCount() ? line : undefined;
+}
+
+/**
+ * Where something happened, as one sentence on the card: "On line 4, in
+ * maxProfit(), with prices = [7, 1, 5]." The line number is the way back to it
+ * in the editor. Any part can be missing; with none, the sentence is hidden.
+ */
+function showWhere(el, { lead, line, fn, call, at, note }) {
+	const code = text => {
+		const c = document.createElement('code');
+		c.textContent = text.length > 160 ? `${text.slice(0, 160)}…` : text;
+		return c;
+	};
+	const parts = [];
+	if (lead) {
+		parts.push([lead]);
+	}
+	if (line) {
+		const jump = document.createElement('button');
+		jump.className = 'jump';
+		jump.dataset.line = String(line);
+		jump.title = 'Show this line in the editor';
+		jump.textContent = `line ${line}`;
+		parts.push([parts.length ? 'on ' : 'On ', jump]);
+	}
+	// "<module>", "<genexpr>", "<lambda>": Python's names, not the student's.
+	// A design call already names its method, so "in top(), at top()" says it once.
+	if (fn && !fn.startsWith('<') && !(at && at.call.startsWith(`${fn}(`))) {
+		parts.push([parts.length ? 'in ' : 'In ', code(`${fn}()`)]);
+	}
+	if (call) {
+		parts.push([parts.length ? 'with ' : 'With ', code(call)]);
+	}
+	// One call of a design case: "at top(), call 7 of 8".
+	if (at) {
+		parts.push([parts.length ? 'at ' : 'At ', code(at.call), `, call ${at.n} of ${at.total}`]);
 	}
 
-	els.okOut.hidden = !printed;
-	els.okOut.textContent = printed.slice(0, 400);
+	el.textContent = '';
+	parts.forEach((part, i) => el.append(...(i ? [', '] : []), ...part));
+	if (parts.length) {
+		el.append('.');
+	}
+	if (note) {
+		el.append(`${parts.length ? ' ' : ''}${note}`);
+	}
+	el.hidden = !parts.length && !note;
+}
+
+/** Calls of one design case listed in Output before the rest are summed up in a line. */
+const DESIGN_ROWS = 200;
+
+/** The returned values in Output, one row per case, marked where they could be checked. */
+function showReturns(sol, cases, loop) {
+	els.returns.textContent = '';
+	const row = (cls, ...cells) => {
+		const li = document.createElement('li');
+		if (cls) {
+			li.className = cls;
+		}
+		for (const [name, text, title] of cells) {
+			const span = document.createElement('span');
+			span.className = name;
+			span.textContent = text;
+			if (title) {
+				span.title = title;
+			}
+			li.appendChild(span);
+		}
+		els.returns.appendChild(li);
+	};
+
+	const markOf = ok => (ok === true ? ['r-mark pass', '✓', 'Matches what was expected']
+		: ok === false ? ['r-mark fail', '✗', 'Not what was expected']
+			: ['r-mark', '']);
+	const note = text => {
+		const li = document.createElement('li');
+		li.className = 'r-note';
+		li.textContent = text;
+		els.returns.appendChild(li);
+	};
+
+	// A design case is a sequence of calls on one object, so it is listed a
+	// call to a row - each marked against its own entry of the expected list,
+	// which is how "top() came back -2" is found without comparing two long
+	// lists of nulls by eye. A call that returns nothing is set quieter.
+	const designRows = steps => {
+		for (const s of steps.slice(0, DESIGN_ROWS)) {
+			row(s.shown === 'null' && s.ok !== false ? 'r-quiet' : '', markOf(s.ok),
+				['r-args', callOf(s)], ['r-val', s.shown],
+				...(s.ok === false ? [['r-want', s.expected]] : []));
+		}
+		if (steps.length > DESIGN_ROWS) {
+			note(`… and ${steps.length - DESIGN_ROWS} more calls.`);
+		}
+	};
+
+	const design = sol?.kind === 'design';
+	cases.forEach((c, i) => {
+		if (design) {
+			if (cases.length > 1 || sol.partial?.length) {
+				note(`Case ${i + 1}`);
+			}
+			const judged = designSteps(c.expected, c.ops ?? []);
+			designRows(judged.steps);
+			if (c.ok === false && !judged.fits) {
+				note(designFact(judged, c.expected) || `Expected ${c.expected}.`);
+			}
+			return;
+		}
+		row('', markOf(c.ok),
+			['r-args', callLabel(c.call, sol.method)],
+			['r-val', c.inPlace ? `${c.inPlace} = ${c.shown}` : c.shown,
+				c.inPlace ? `Returns nothing: this is ${c.inPlace} after the call` : ''],
+			...(c.ok === false ? [['r-want', c.expected]] : []));
+	});
+
+	// The calls a design case made before one raised, or never returned.
+	if (design && sol.partial?.length) {
+		note(`Case ${cases.length + 1}, until it stopped`);
+		designRows(sol.partial);
+	}
+	if (sol?.failed) {
+		const at = designAt(sol.failed);
+		note(at
+			? `${at.call}, call ${at.n} of ${at.total}, raised an error, and nothing after it was run.`
+			: `${callLabel(sol.failed, sol.method)} raised an error, and the cases after it were not run.`);
+	}
+	if (loop?.case && sol) {
+		const at = designAt(loop.case);
+		note(at ? `${at.call}, call ${at.n} of ${at.total}, never returned.` : `${callLabel(loop.case, sol.method)} never returned.`);
+	}
+	if (sol?.truncated) {
+		note('Only the first 50 cases were run.');
+	}
+	// A leftover Expected box is easy to miss behind its tab, and pairs its
+	// answers with the wrong cases without a word.
+	const expectedCount = els.expect.value.split('\n').filter(l => l.trim()).length;
+	if (expectedCount && cases.length && expectedCount !== cases.length && !sol?.failed && !loop) {
+		note(`Expected has ${expectedCount} line${expectedCount === 1 ? '' : 's'} for ${cases.length} case${cases.length === 1 ? '' : 's'}; `
+			+ 'each line is checked against the case in the same position.');
+	}
+
+	els.returns.hidden = !els.returns.childNodes.length;
+	if (!els.returns.hidden) {
+		els.outEmpty.hidden = true;
+	}
+}
+
+/** The Solution ran: what it returned, whether that was right, or why it could not be called. */
+function showSolution(result, sol, cases, plan) {
+	els.card.hidden = true;
+	els.values.hidden = true;
+
+	if (sol.needsInput || sol.inputError) {
+		showInputNeeded(sol, plan);
+		return;
+	}
+
+	const wrong = cases.filter(c => c.ok === false);
+	if (wrong.length && sol.kind === 'design') {
+		showDesignWrong(cases, wrong);
+		return;
+	}
+	if (wrong.length) {
+		const first = wrong[0];
+		// What the model is told about: the first wrong case, as values returned
+		// rather than lines printed.
+		lastRun.expected = first.expected;
+		lastRun.call = first.call;
+		lastRun.returned = first.shown;
+		lastRun.caseIndex = cases.indexOf(first);
+		lastRun.inPlace = first.inPlace;
+		lastRun.difference = differenceOf(first.expected, first);
+		showDiff(first.expected, first.shown);
+		showWhere(els.diffCase, {
+			lead: cases.length > 1 ? `Case ${cases.indexOf(first) + 1} of ${cases.length}` : '',
+			call: callLabel(first.call, sol.method),
+			note: wrong.length > 1 ? `${wrong.length} of the ${cases.length} are wrong; this is the first.` : '',
+		});
+		els.diffFact.textContent = lastRun.difference;
+		els.diffFact.hidden = !lastRun.difference;
+		explain(undefined, 'diff');
+		return;
+	}
+
+	els.okCard.hidden = false;
+	els.diffCard.hidden = true;
+	els.okCard.classList.remove('stalled', 'asking');
+
+	const n = cases.length;
+	const checked = cases.filter(c => c.ok !== undefined).length;
+	const examples = plan?.from === 'problem'
+		? ` on the ${n === 1 ? 'example' : `${n} examples`} from the Problem`
+		: '';
+
+	// The answers themselves are listed once, in Output under the code.
+	if (checked && checked === n) {
+		els.okTitle.textContent = n === 1 ? 'Matches' : `All ${n} match`;
+		els.okMeta.textContent = `${sol.method} returned the expected answer${n === 1 ? '' : ' every time'}${examples}.`;
+	} else {
+		els.okTitle.textContent = 'Ran cleanly';
+		els.okMeta.textContent = checked
+			? `${checked} of ${n} matched what was expected; the rest had nothing to check against.`
+			: `No errors. What ${sol.method} returned${examples} is in Output, under the code.`;
+	}
+}
+
+/**
+ * A design case came back wrong: the card names the one call that did, with
+ * its expected and returned values, rather than setting two long lists of
+ * nulls side by side to be compared by eye. Output has the whole sequence.
+ */
+function showDesignWrong(cases, wrong) {
+	const first = wrong[0];
+	const judged = designSteps(first.expected, first.ops ?? []);
+	const step = judged.steps[judged.first];
+	const total = judged.steps.length;
+	const before = judged.steps.slice(0, Math.max(0, judged.first)).map(callOf);
+	const earlier = before.length > 6 ? [...before.slice(0, 2), '…', ...before.slice(-3)] : before;
+
+	// What the model is told: the call that came back wrong, and the calls that led up to it.
+	lastRun.expected = step ? step.expected : first.expected;
+	lastRun.returned = step ? step.shown : first.shown;
+	lastRun.call = step ? `${callOf(step)} - call ${judged.first + 1} of ${total}, after ${earlier.join(', ')}` : first.call;
+	lastRun.method = step?.op;
+	lastRun.caseIndex = cases.indexOf(first);
+	lastRun.difference = designFact(judged, first.expected);
+	lastRun.design = judged;   // each call, judged, with the object after it
+
+	showDiff(lastRun.expected, lastRun.returned);
+	showWhere(els.diffCase, {
+		lead: cases.length > 1 ? `Case ${cases.indexOf(first) + 1} of ${cases.length}` : '',
+		at: step ? { call: callOf(step), n: judged.first + 1, total } : undefined,
+		note: wrong.length > 1 ? `${wrong.length} of the ${cases.length} cases are wrong; this is the first.` : '',
+	});
+	els.diffFact.textContent = lastRun.difference;
+	els.diffFact.hidden = !lastRun.difference;
+	explain(undefined, 'diff');
+}
+
+/** What the ok card's one action does, while it shows one. */
+let okAction;
+
+/** Puts an action under the ok card, or takes it away. */
+function setOkAction(label, action) {
+	okAction = action;
+	els.okAct.textContent = label ?? '';
+	els.okFoot.hidden = !action;
+}
+
+els.okAct.addEventListener('click', () => okAction?.());
+
+/** Empties a remembered box, the way typing it empty would - saved, and its tab's dot updated. */
+function clearBox(box) {
+	box.value = '';
+	box.dispatchEvent(new Event('input'));
+}
+
+/** There was nothing to call it with, or what there was does not fit the method. */
+function showInputNeeded(sol, plan) {
+	els.okCard.hidden = false;
+	els.diffCard.hidden = true;
+	els.okCard.classList.toggle('asking', Boolean(sol.needsInput));
+	els.okCard.classList.toggle('stalled', !sol.needsInput);
+
+	const design = sol.kind === 'design';
+	const signature = design ? sol.method : `${sol.method}(${sol.params.join(', ')})`;
+	// How a case is written for this code, with its own names in it.
+	let example;
+	if (design) {
+		const shown = (sol.methods ?? []).slice(0, 2);
+		const ops = [sol.method, ...shown].map(n => JSON.stringify(n)).join(',');
+		const args = [sol.params, ...shown.map(m => sol.signatures?.[m] ?? [])]
+			.map(names => `[${names.join(', ')}]`).join(',');
+		example = `[${ops}]\n[${args}]`;
+	} else {
+		example = sol.params.map(p => `${p} = …`).join(', ');
+	}
+
+	// The commonest way to get here with input that does not fit: the Problem
+	// tab still holds yesterday's exercise, and its examples were run against
+	// today's code. That is worth saying plainly, with the way out beside it.
+	const stale = Boolean(sol.inputError) && plan?.from === 'problem';
+	if (sol.needsInput) {
+		els.okTitle.textContent = 'Needs a test case';
+		els.okMeta.textContent = design
+			? `${signature} is ready to drive. Put its calls in Test cases the way LeetCode writes them - `
+				+ `the operations on one line, their arguments on the next, with real values: ${example.replace('\n', ' then ')} - `
+				+ 'or paste the problem under Problem, and its examples are used.'
+			: `${signature} is ready to call. Put its arguments in Test cases - ${example} - `
+				+ 'or paste the problem under Problem, and its examples are used.';
+	} else if (stale) {
+		els.okTitle.textContent = 'The Problem is for different code';
+		els.okMeta.textContent = `Its examples were run against ${signature}, and they do not fit: ${sol.inputError}. `
+			+ 'Is it the problem from an earlier exercise?';
+	} else {
+		els.okTitle.textContent = 'Input does not fit';
+		els.okMeta.textContent = design
+			? `${sol.inputError}. Write each case as two lines - the operations, then their arguments: ${example.replace('\n', ' then ')}.`
+			: `${sol.inputError}. Write each case as ${example || `${sol.method}()`}, one per line.`;
+	}
+	setOkAction(stale ? 'Clear the Problem and run again' : undefined, stale ? () => {
+		clearBox(els.problem);
+		run();
+	} : undefined);
+
+	// Where the answer goes, opened and ready, with the method's own names in it.
+	els.input.placeholder = design
+		? `${example}\n\nThe operations on one line, their arguments on the next. Left empty, the Problem's examples are used.`
+		: `${example}\n\nOne case per line, or paste a whole example. Left empty, the Problem's examples are used.`;
+	selectTab(stale ? 'problem' : 'tests');
+}
+
+/**
+ * A run that would not end, and where it was stuck.
+ *
+ * Only a while loop whose condition's names never changed while watched is
+ * called infinite - that is a fact the harness observed, not a guess. Anything
+ * else is reported as still running, with the values that were still moving.
+ */
+function showLoop(loop, code) {
+	els.card.hidden = false;
+	els.okCard.hidden = true;
+	els.diffCard.hidden = true;
+
+	const where = loop.loop;
+	const line = where?.line ?? loop.line;
+	const watched = loop.watched ?? [];
+	const held = watched.map(n => `${n} stayed ${loop.locals?.[n]}`).join(', ');
+
+	els.errType.textContent = loop.stuck ? 'Infinite loop' : 'Still running';
+	if (loop.stuck) {
+		els.errMsg.textContent = `${held} the whole time it was watched, so "${where.condition}" never turned false.`;
+		els.errHint.textContent = `A while loop ends only when its condition turns false, and that can only happen `
+			+ `if something inside it changes ${watched.join(' or ')}. What in this loop does?`;
+	} else {
+		els.errMsg.textContent = `Stopped after ${loop.seconds}s`
+			+ (where ? `, still in the ${where.kind} loop on line ${where.line}.` : line ? `, on line ${line}.` : '.');
+		els.errHint.textContent = where
+			? 'Its values were still changing, so it may only be slow - or its end is never reached. '
+				+ 'Does each pass bring it closer to the end?'
+			: 'It had not finished. Is something here doing far more work than the input needs?';
+	}
+	const shown = inBuffer(line);
+	if (shown) {
+		markLine({
+			type: els.errType.textContent,
+			message: loop.stuck ? `${watched.join(', ')} never changes` : `still running after ${loop.seconds}s`,
+			primary: { line: shown },
+		}, code.split('\n')[shown - 1] ?? '');
+		editor.revealLineInCenterIfOutsideViewport(shown, monaco.editor.ScrollType.Smooth);
+	}
+	const at = designAt(loop.case);
+	showWhere(els.errWhere, {
+		line: shown,
+		fn: loop.function,
+		call: at ? undefined : loop.case && lastRun.solution ? callLabel(loop.case, lastRun.solution.method) : loop.case,
+		at,
+	});
+
+	// The values, with what the verdict rests on picked out: the names the
+	// condition reads, which never moved, and the ones that did.
+	els.valuesRows.textContent = '';
+	const entries = Object.entries(loop.locals ?? {});
+	els.values.hidden = entries.length === 0;
+	els.valuesHead.textContent = loop.stuck ? 'Values while it was stuck' : 'Values when it was stopped';
+	for (const [name, repr] of entries) {
+		const changed = loop.changed?.includes(name);
+		const row = valueRow(name, repr, changed);
+		const note = watched.includes(name) && !changed ? 'never changed' : changed ? 'changing' : '';
+		if (watched.includes(name) && !changed) {
+			row.className = 'stuck';
+		}
+		if (note) {
+			const span = document.createElement('span');
+			span.className = 'vnote';
+			span.textContent = note;
+			row.lastChild.appendChild(span);
+		}
+		els.valuesRows.appendChild(row);
+	}
+
+	explain();
 }
 
 /**
@@ -509,9 +982,10 @@ function markLine(parsed, text) {
 
 els.run.addEventListener('click', run);
 els.stop.addEventListener('click', () => window.studio.stop());
-els.jump.addEventListener('click', () => {
-	const line = lastRun?.parsed?.primary?.line;
-	if (line) {
+// The line number in a card's "On line 4, ..." sentence goes back to that line.
+document.addEventListener('click', e => {
+	const line = Number(e.target.closest?.('.jump')?.dataset.line);
+	if (line && inBuffer(line)) {
 		editor.revealLineInCenter(line, monaco.editor.ScrollType.Smooth);
 		editor.setPosition({ lineNumber: line, column: 1 });
 		editor.focus();
@@ -652,7 +1126,7 @@ function answerInto(box, status, messages, { retry, clean = stripReasoning } = {
 			if (mine()) {
 				box.innerHTML = render(answer);
 				const secs = ((Date.now() - started) / 1000).toFixed(1);
-				setStatus(status, 'done', `${model} · ${secs}s${truncated ? ' · cut short at the length limit' : ''}`);
+				setStatus(status, 'done', `Answered by ${model} in ${secs}s${truncated ? ', cut short at the length limit' : ''}.`);
 			}
 			// An answer is proof the model is loaded, whatever the header last said.
 			if (ai.provider === provider && ai.model === model && warmState !== 'ready') {
@@ -690,32 +1164,46 @@ async function explain(question, target = 'error', reveal = false) {
 	const out = target === 'diff' ? els.diffExplain : els.explain;
 	const meta = target === 'diff' ? els.diffMeta : els.aiMeta;
 
-	const messages = [
-		{ role: 'system', content: reveal ? SYSTEM_PROMPT_REVEAL : SYSTEM_PROMPT },
-		// One worked example, for teaching only: a small model copies its shape.
-		...(reveal ? [] : TEACHING_EXAMPLE),
-		{
-			role: 'user',
-			content: buildPrompt({
-				code: lastRun.code,
-				parsed: lastRun.parsed,
-				stdout: lastRun.stdout,
-				expected: lastRun.expected,
-				values: lastRun.values,
-				trace: lastRun.trace,
-				problem: els.problem.value,
-				question,
-			}) + (reveal ? '' : TEACHING_RULES),
-		},
-	];
+	// The request and the cleaning of its answer are built in ai.js, where they
+	// were measured: the teaching answer never shows the fix, in code or in
+	// words, whatever the model wrote - Show the fix is where the fix lives.
+	const { messages, clean } = buildTeaching({
+		code: lastRun.code,
+		parsed: lastRun.parsed,
+		stdout: lastRun.stdout,
+		expected: lastRun.expected,
+		values: lastRun.values,
+		trace: lastRun.trace,
+		problem: els.problem.value,
+		question,
+		...solutionFacts(lastRun),
+	}, { reveal });
 
 	explaining = answerInto(out, meta, messages, {
 		retry: () => explain(question, target, reveal),
-		// The teaching answer never shows code, whatever the model wrote;
-		// "Show the fix" is where the fix lives.
-		clean: reveal ? stripReasoning : text => withoutCode(stripReasoning(text)),
+		clean,
 	});
 	return explaining.done;
+}
+
+/**
+ * What a Solution or design run adds to a prompt: the calls, what they
+ * returned, which one was wrong, and any stuck loop. For a design case the
+ * "method" is the one call that came back wrong.
+ */
+function solutionFacts(run) {
+	return {
+		loop: run?.loop,
+		method: run?.method ?? run?.solution?.method,
+		calls: run?.solution?.cases,
+		call: run?.call,
+		returned: run?.returned,
+		difference: run?.difference,
+		failed: run?.solution?.failed,
+		caseIndex: run?.caseIndex,
+		inPlace: run?.inPlace,
+		design: run?.design,
+	};
 }
 
 els.ask.addEventListener('click', () => explain());
@@ -933,6 +1421,90 @@ window.addEventListener('keydown', e => {
 		}
 	});
 })();
+
+/*
+ * The same for the panel under the code: a long traceback or forty test cases
+ * want it tall, writing code wants it short. Remembered in pixels, and kept to
+ * what leaves the editor some room in whatever window it comes back in.
+ */
+(() => {
+	const work = els.hsplit.parentElement;
+	const fit = h => Math.round(Math.min(work.clientHeight - 160, Math.max(120, h)));
+	const set = h => document.documentElement.style.setProperty('--panel-h', `${fit(h)}px`);
+
+	let saved;
+	try {
+		saved = Number(localStorage.getItem('panelHeight'));
+	} catch {
+		/* storage disabled; the panel starts at its default height */
+	}
+	if (saved >= 120) {
+		set(saved);
+	}
+
+	let dragging = false;
+	els.hsplit.addEventListener('mousedown', e => {
+		dragging = true;
+		els.hsplit.classList.add('dragging');
+		e.preventDefault();
+	});
+
+	window.addEventListener('mousemove', e => {
+		if (dragging) {
+			set(work.getBoundingClientRect().bottom - e.clientY);
+		}
+	});
+
+	window.addEventListener('mouseup', () => {
+		if (!dragging) {
+			return;
+		}
+		dragging = false;
+		els.hsplit.classList.remove('dragging');
+		try {
+			localStorage.setItem('panelHeight', String(parseInt(getComputedStyle(document.documentElement).getPropertyValue('--panel-h'), 10)));
+		} catch {
+			/* the height just will not persist */
+		}
+	});
+})();
+
+// --- the panel's tabs ----------------------------------------------------------
+
+/** Shows one of Output, Test cases and Problem. */
+function selectTab(name) {
+	for (const tab of els.tabs) {
+		const on = tab.id === `tab-${name}`;
+		tab.setAttribute('aria-selected', String(on));
+		tab.tabIndex = on ? 0 : -1;
+		$(tab.getAttribute('aria-controls')).hidden = !on;
+	}
+}
+
+for (const tab of els.tabs) {
+	tab.addEventListener('click', () => selectTab(tab.id.slice('tab-'.length)));
+	// Arrow keys move between tabs, as they do in any tab strip.
+	tab.addEventListener('keydown', e => {
+		const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+		if (!step) {
+			return;
+		}
+		const next = els.tabs[(els.tabs.indexOf(tab) + step + els.tabs.length) % els.tabs.length];
+		selectTab(next.id.slice('tab-'.length));
+		next.focus();
+		e.preventDefault();
+	});
+}
+
+/**
+ * A dot on a tab with something in it. A problem pasted yesterday, or an
+ * expected output left over from the last exercise, is easy to forget behind a
+ * tab - and a stale expected output turns every correct run red.
+ */
+function markFilled() {
+	$('tab-tests').classList.toggle('filled', Boolean(els.input.value.trim() || els.expect.value.trim()));
+	$('tab-problem').classList.toggle('filled', Boolean(els.problem.value.trim()));
+}
 
 /** Ctrl +/- changes the editor font, as it does in every other editor. */
 (() => {
@@ -1528,35 +2100,22 @@ function normalise(text) {
 }
 
 /**
- * A collapsible box that remembers what was typed in it.
+ * A box in the panel that remembers what was typed in it.
  *
- * There are two: the problem being solved, and the output it should produce.
- * Both are things you paste once and then run against twenty times, so losing
- * either on restart would make them not worth filling in. Both start open when
- * there is something in them, because a box you cannot see is a box you forget
- * is set - and a stale expected output turns every correct run red.
+ * The problem, the test cases and the expected answers are all things you
+ * paste once and then run against twenty times, so losing any of them on
+ * restart would make them not worth filling in.
  */
-function rememberBox(box, toggle, key) {
-	const setOpen = open => {
-		box.hidden = !open;
-		toggle.setAttribute('aria-expanded', String(open));
-	};
-
+function rememberText(box, key) {
 	try {
 		box.value = localStorage.getItem(key) ?? '';
 	} catch {
 		/* storage disabled; the box simply starts empty */
 	}
-	setOpen(Boolean(box.value));
-
-	toggle.addEventListener('click', () => {
-		setOpen(box.hidden);
-		if (!box.hidden) {
-			box.focus();
-		}
-	});
+	markFilled();
 
 	box.addEventListener('input', () => {
+		markFilled();
 		try {
 			localStorage.setItem(key, box.value);
 		} catch {
@@ -1574,6 +2133,8 @@ function showDiff(expected, got) {
 	els.diffGot.textContent = got || '(nothing)';
 	els.diffExplain.innerHTML = '';
 	els.diffMeta.textContent = '';
+	els.diffCase.hidden = true;
+	els.diffFact.hidden = true;
 }
 
 els.diffAsk.addEventListener('click', () => explain(undefined, 'diff'));
@@ -1752,6 +2313,7 @@ async function ask(question, mode = 'ask', scope = selection) {
 				values: lastRun?.values,
 				trace: lastRun?.trace,
 				problem: els.problem.value,
+				...solutionFacts(lastRun),
 			}),
 		},
 	];
@@ -1812,6 +2374,7 @@ function showValues(values) {
 	els.valuesRows.textContent = '';
 	const entries = values?.locals ? Object.entries(values.locals) : [];
 	els.values.hidden = entries.length === 0;
+	els.valuesHead.textContent = 'Values at that moment';
 
 	for (const [name, repr] of entries) {
 		els.valuesRows.appendChild(valueRow(name, repr));
@@ -1971,22 +2534,22 @@ function setStep(index, reveal = true) {
 
 	const where = step.fn === '<module>' ? 'the file itself' : `${step.fn}()`;
 	if (step.ret !== undefined) {
-		els.traceWhere.textContent = `${traceAt + 1}/${traceSteps.length} · line ${step.line} — ${where} returned ${step.ret}`;
+		els.traceWhere.textContent = `Step ${traceAt + 1} of ${traceSteps.length}: line ${step.line}, where ${where} returned ${step.ret}.`;
 	} else if (step.r) {
-		els.traceWhere.textContent = `${traceAt + 1}/${traceSteps.length} · line ${step.line} — ${where} ended`;
+		els.traceWhere.textContent = `Step ${traceAt + 1} of ${traceSteps.length}: line ${step.line}, where ${where} ended.`;
 	} else if (step.exc) {
-		els.traceWhere.textContent = `${traceAt + 1}/${traceSteps.length} · line ${step.line} — raised ${step.exc}`;
+		els.traceWhere.textContent = `Step ${traceAt + 1} of ${traceSteps.length}: line ${step.line} raised ${step.exc}.`;
 	} else {
 		// A line event fires before the line runs, so this is about to happen,
 		// not just happened. Saying so is the difference between the panel
 		// making sense and being off by one.
-		els.traceWhere.textContent = `${traceAt + 1}/${traceSteps.length} · about to run line ${step.line} in ${where}`;
+		els.traceWhere.textContent = `Step ${traceAt + 1} of ${traceSteps.length}: about to run line ${step.line} in ${where}.`;
 	}
 
 	// Landing on the first step after the gap without being told would read as
 	// one continuous run that skipped from the second pass to the last.
 	if (lastTrace?.dropped && traceAt === lastTrace.gapAt) {
-		els.traceWhere.textContent += `  · ${lastTrace.dropped} steps before this were not recorded`;
+		els.traceWhere.textContent += ` ${lastTrace.dropped} steps before this were not recorded.`;
 	}
 
 	els.traceVars.textContent = '';

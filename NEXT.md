@@ -1,6 +1,6 @@
 # Where this got to, and what is next
 
-Updated 2026-10-31. Everything described as done is on `main`.
+Updated 2026-11-15. Everything described as done is on `main`.
 
 ## The point of the app, in one paragraph
 
@@ -13,8 +13,67 @@ quieter second button.
 
 ## Done
 
+- **2026-11-15: the paths a LeetCode user actually hits, and the tutor's leaks.**
+  - *Design problems run.* `class MinStack` with `["MinStack","push",...]` and
+    its argument lists, or the example pasted whole (bare `Input` / `Output`
+    headings), is driven call by call (`run_design` in the harness). Output
+    lists every call; the first wrong one gets the card ("At getMin(), call 8
+    of 8") and a checked fact (`designSteps` / `designFact` in `cases.js`). A
+    crash names the call; no cases asks for them in the class's own names.
+  - *`self` is opened up.* Traces, crash values and loop samples show
+    `self.stack`, not an address (`named_values`, at most 8 attributes), and a
+    design call records the object's attributes after it (`state`).
+  - *Input is a script's stdin*, written and closed (`run:start` takes it as a
+    third argument). The EOFError note says whether Input was empty or ran out.
+  - *A Solution that calls itself* with no cases runs as a script - it used to
+    be called on nothing and report "needs a test case" over its own output.
+  - *A stale Problem is named* when its examples do not fit the method: "The
+    Problem is for different code", one action to clear it and run again.
+  - *Big locals at a crash are glanced at*, not repr'd whole: a 2-million-item
+    list was formatted in full before being cut to 200 characters.
+  - *The tutor no longer gives the fix in words.* Measured: 21 of 24 automatic
+    explanations handed it over in prose after a correct diagnosis.
+    `teachingOnly()` cuts at the first fix sentence or non-quoting block and
+    says so: 0 of 32 after. It also drops the request's own question when the
+    model repeats it as a heading, and "Ask the student:" labels.
+  - *The wrong-answer request is facts only*: the call, both answers, the code,
+    each value's history along the call that made the answer (`callHistory`),
+    and "walk through it, then ask one question". Reversed answer 2/6 -> ~6/8,
+    off-by-one sum 2/6 -> ~5/8. A design case gets the calls with the object
+    after each instead (`designStory`): 3/16 -> 6-7/16, on two bugs.
+  - *Tests*: teachingOnly shapes, callHistory, the compact prompt, design
+    harness runs, stdin, big values, design examples and facts, the EOF note.
+    A third full-app script (16 checks) covers design, stale Problem,
+    self-call and stdin; the 33- and 60-check scripts still pass.
+- **LeetCode solutions run as they are.** A `class Solution` is called on each
+  test case by the harness (`run_solution`), with LeetCode's imports, `ListNode`
+  and `TreeNode` built from `[1,2,3]` where the signature says so, and in-place
+  methods reporting their argument. Cases come from *Input* (Test cases tab), or from
+  the pasted Problem's examples (`renderer/cases.js`), and each answer is judged
+  against the Expected box or the examples' `Output:` lines - as values, with
+  LeetCode's 1e-5 float tolerance and "in any order" honoured. A wrong case gets
+  the diff card and, where it is simple, a checked difference ("reversed").
+- **A loop that cannot end is named, not timed out.** A watchdog thread samples
+  the stack at 5s; a `while` whose condition's names never changed is reported
+  as an *Infinite loop* with its line, condition and values. Anything else gets
+  until 12s and is called *Still running*.
+- **A second full-app script, 33 checks**, and the 56-check one rerun, which
+  found an old race: late output chunks threw away the full output (fixed with
+  run numbers).
+- **Decluttered (2026-11-01).** The problem drawer above the code and the
+  Input / Expected drawers beside Output became one panel under the code with
+  three tabs (Output, Test cases, Problem), resizable from its top edge, with a
+  dot on a tab that has something in it. Cards lost their boxes: one large
+  verdict line, a "where" sentence ("On line 4, in maxProfit(), with ...")
+  whose line number jumps to the line, the values and the diff unboxed, and
+  secondary actions as words instead of outlined buttons. A clean run no longer
+  repeats its output on the card. Answer status reads "Answered by MODEL in
+  1.4s." The 56-check script gained tab checks (60) and the Solution script now
+  checks the where sentence; it caught `<genexpr>()` being named as the
+  function, now the nearest function the student wrote.
 - **The chalkboard redesign.** Problem above the code, Output beside Expected
-  output under it, the right column only the tutor's. A green slate with chalk
+  output under it, the right column only the tutor's. (Since replaced by the
+  tabbed panel above.) A green slate with chalk
   colours that each mean one thing; the error's name as the card's headline; a
   dot on the bar for whether the model is ready. System fonts only - nothing
   downloaded or bundled. Every id the code uses was kept.
@@ -38,8 +97,8 @@ quieter second button.
   no model running still lands in the thread, with the reason. Each request
   has its own controller. The model is loaded at launch and kept loaded.
 - **The default is the small non-thinking coder** (`qwen2.5-coder:1.5b`), not
-  the 7.6B - see the trap below. Its teaching answers have code blocks removed
-  mechanically (`withoutCode`), since it will not hold the rule on its own.
+  the 7.6B - see the trap below. Its teaching answers have the fix removed
+  mechanically (`teachingOnly`), since it will not hold the rule on its own.
 - Setup checklist: finds Python, starts every model server it finds that is
   installed but stopped - Ollama and LM Studio, from one **Start models**
   button - stops again on quit whatever it started, and downloads a model with
@@ -63,8 +122,9 @@ quieter second button.
 - **`npm test` lints first.** eslint with `no-undef` exists because three
   separate features were broken by a name that was never declared, and none of
   them said so.
-- `npm test` covers the traceback parser, the harness and its tracer, XSS
-  payloads against the answer renderer, and model choice and prompt shape.
+- `npm test` covers the traceback parser, the harness, its tracer, the
+  Solution runner and the loop watchdog, XSS payloads against the answer
+  renderer, test cases from pasted problems, and model choice and prompt shape.
   `npm audit` clean on Electron 44.
 
 ## Next, in this order
@@ -86,22 +146,26 @@ quieter second button.
 
 ### 2. Worth doing next
 
-- **A second test case.** *Expected output* holds one expected string. A table
-  of cases would catch the bug that only shows on an empty list.
 - **A trace that survives the run.** The step-through is dropped when you run
   again; keeping the last few would let you compare two attempts.
 - **Loading Whisper is all-or-nothing.** The first press of the microphone pays
   17s for it. Loading it in the background once the app is idle would hide
   that, at the cost of memory nobody asked for - which is why it is not done.
 - **One file.** No open, no save-as, no tabs.
-- **An input box.** stdin is closed, so `input()` fails at once with a clear
-  note. Competitive-programming style solutions read their test case from
-  stdin; a third drawer beside Expected output, written to the process's stdin,
-  would run them as they are.
-- **Wrong-answer explanations from the 1.5B are its weakest output.** On the
-  backwards `two_sum` it has invented an IndexError. Worth trying: put the
-  first differing value of the diff, and the step where it was produced, into
-  the closing question - the same trick that fixed the crash explanations.
+- **Design-bug explanations from the 1.5B are its weakest output now** - 6-7
+  of 16 name the cause even with the object's state per call. The scratch
+  measuring script built them from a real harness run of each buggy class;
+  doing the same in `test/` (behind an opt-in flag, since it needs Ollama)
+  would make the next prompt change measurable by anyone. Suggesting a larger
+  model in the card when the run is a design problem is the other lever.
+- **A top-level function as a test.** `def two_sum(nums, target)` with no call
+  could be called on Input the way a Solution method is.
+- **Wrong-answer explanations: the question at the end.** It ends on a
+  question about 1 time in 4 and the question is often the student's own
+  ("why does it return -3?"). Measured attempts to force it (a sentence cap)
+  hurt the explanation; untried: asking for the question first.
+- **Memory in a stuck loop.** One appending on every pass reached ~35 million
+  items in five seconds. A memory ceiling on the child would bound it.
 
 ## Things worth not rediscovering
 
@@ -113,11 +177,42 @@ quieter second button.
   `close` clears `current` only if it is still that child. The renderer drops
   a result from a run that has been replaced (`runSeq`).
 - **Close stdin.** Left open, `input()` waits for text that never comes, for
-  the full time limit, and is then described as a possible infinite loop.
+  the full time limit, and is then described as a possible infinite loop. Input
+  is written first and then it is closed - never left open for typing.
+- **A small model hands over the fix in words, after the diagnosis.** Removing
+  code blocks was not enough: 21 of 24 answers said "to fix this, change X to
+  Y" in prose. Cut at the first such sentence (`teachingOnly`); a sentence is a
+  fix when it puts forward code the student did not write, not when it says
+  what a value should have been.
+- **For wrong answers, less prompt is better on a 1.5B.** The problem
+  statement, step-by-step trace and instruction list it used to get made it
+  blame correct lines. Two answers, the code, each value's history and "walk
+  through how it gets there" did far better. Measure a prompt change over 6-8
+  samples per bug against Ollama directly before believing it; one answer
+  says nothing at this temperature.
 - **Draw streamed output in batches.** `python -u` sends every `print()` as its
   own chunk; a span and a scroll per chunk is a layout per line, and 20,000
   lines that ran in 0.8s took 149s to appear. Chunks are drawn every 50ms and
   only the last 100k characters are kept while it runs.
+- **Output chunks can arrive after the run's result.** They are separate IPC
+  messages and are not ordered against the reply. A late chunk landing on the
+  fully drawn output tripped the streaming size cap, which removes the oldest
+  node - the whole output - so 20,000 lines showed the last 2,000, depending on
+  timing. Every chunk carries its run's number; a run that has been drawn in
+  full (`finishedRun`) takes no more.
+- **A worked example is copied, content and all.** The crash example
+  (`nums[len(nums)]`, IndexError) sent with wrong-answer explanations made the
+  1.5B invent that IndexError in a third of them. It goes with crashes only.
+- **The loop watchdog must speak before the editor's limit.** main.js kills at
+  15s with no report; the harness gives up at 12s so its report always lands.
+  It samples three times rather than once, because "still changing" is the
+  difference between slow and stuck, and it never calls a `for` loop stuck.
+- **Examples are parsed in the renderer, not the harness.** A pasted problem
+  has explanations running over several lines and constraints after; only
+  `cases.js` sees the whole text, and it sends the harness bare inputs.
+- **Test against a throwaway profile.** `STUDIO_USERDATA` gives a test run its
+  own `userData`, which is also what the single-instance lock is keyed on - so
+  a test no longer needs the user's open copy closed, or a backup of their data.
 - **A test window is throttled unless told not to be.** Launched from a script
   it opens behind the terminal, and Chromium throttles an occluded page's
   timers to about one a minute. `STUDIO_SHOT` mode turns background throttling
@@ -166,8 +261,8 @@ quieter second button.
 - **A 1.5B will not hold the no-fix rule, and that is now handled in code.**
   `qwen2.5-coder:1.5b` wrote corrected code in 9/9 crash explanations under the
   long rule list. A short system prompt, one worked example and the rules
-  repeated at the end of the request got it to 4/12; `withoutCode()` takes it
-  to 0/12 shown. It still rarely ends with a question, and without recorded
+  repeated at the end of the request got it to 4/12; `teachingOnly()` (then
+  `withoutCode()`, code blocks only) takes it to 0 shown. It still rarely ends with a question, and without recorded
   values it can name the wrong cause - with them it was right 3/3.
 - **Only a 1.5B fits a 4 GB GPU.** At `num_ctx` 8192 a 4B got 2.3 of 4.1 GB
   onto the GPU; the context is 4096 now, which every request fits in.

@@ -13,8 +13,12 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('studio', {
-	/** Writes the code to disk and runs it. Resolves once the process exits. */
-	run: code => ipcRenderer.invoke('run:start', code),
+	/**
+	 * Writes the code, and the test cases for a Solution or a design class, to
+	 * disk and runs it, with `stdin` as what a script's input() reads.
+	 * Resolves once the process exits.
+	 */
+	run: (code, input, stdin) => ipcRenderer.invoke('run:start', code, input, stdin),
 
 	/** Kills the running process and its children. */
 	stop: () => ipcRenderer.invoke('run:stop'),
