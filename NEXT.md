@@ -1,9 +1,6 @@
 # Where this got to, and what is next
 
-Updated 2026-11-15. `main` has everything up to the chalkboard redesign
-(2026-10-31). The LeetCode Solution runner, the loop watchdog, the declutter
-(2026-11-01) and everything under *2026-11-15* are one commit on the
-`leetcode-and-tutor` branch, off `main`.
+Updated 2026-11-15. Everything described as done is on `main`.
 
 ## The point of the app, in one paragraph
 
