@@ -19,10 +19,19 @@ quieter button rather than the default.
 
 ## The window
 
-The left side is yours and reads top to bottom in the order you work: the
-problem you are solving, your code, and what it printed beside what it should
-have printed. The right side is the tutor's: what went wrong, the step-through,
-and the questions you asked about it, with the question box at the bottom.
+The left side is yours: the code, and under it one panel with three tabs -
+**Output** (what it printed, or what a Solution returned), **Test cases** (the
+input, beside what it should produce) and **Problem** (the question you are
+solving). Only one of those is read at a time, so only one is shown; a tab with
+something in it carries a dot, so a problem pasted yesterday cannot hide. The
+panel's height is dragged from its top edge and remembered. The right side is
+the tutor's: one card for what went wrong, the step-through, and the questions
+you asked about it, with the question box at the bottom.
+
+A card leads with one loud line - *IndexError*, *Wrong answer*, *All 3 match* -
+and says where in a sentence: "On line 4, in maxProfit(), with prices =
+[7,1,5]." The line number goes back to the line. Nothing on that side is boxed
+except the things you type into.
 
 It is drawn as a chalkboard - a green slate with chalk-white writing - and the
 few colours each mean one thing: yellow for something you can do, pink for an
@@ -34,10 +43,42 @@ elsewhere), so nothing is downloaded and nothing is bundled.
 
 - Opens blank, or on the file you had last.
 - **Run** (<kbd>Ctrl</kbd>+<kbd>Enter</kbd>) executes the buffer and streams the
-  output. **Stop** ends it; a run still going after 15 seconds is stopped for
-  you and said so, rather than reported as clean.
-- There is no keyboard input. A program that calls `input()` fails at once with
-  an `EOFError` and a note saying so - put the test values in the code instead.
+  output. **Stop** ends it.
+- **Paste a LeetCode solution as it is.** A `class Solution` prints nothing - what
+  it returns is the answer - so it is called, the way LeetCode calls it, on each
+  test case, and Output lists what came back: `columnNumber = 28 → "AB"`. The
+  cases come from *Input*, under the *Test cases* tab, written as LeetCode writes them
+  (`nums = [2,7,11,15], target = 9`, one case per line, or a whole example
+  pasted in); left empty, the examples in the pasted *Problem* are used, and
+  their `Output:` lines become the expected answers. Each case is then marked
+  right or wrong, a wrong one gets the expected-vs-got card for that case, and
+  where the difference is simple it is stated as a checked fact - "the right
+  characters, in the opposite order". `List`, `Optional`, `defaultdict`,
+  `heapq` and the rest of LeetCode's imports are there without importing them,
+  `[1,2,3]` becomes a `ListNode` or `TreeNode` where the signature says so, and
+  a method that returns nothing ("modify nums in-place") shows the argument
+  after the call. A Solution with its own `print(Solution().twoSum(...))` at
+  the bottom, and nothing in *Input*, runs as the script it is.
+- **Design problems too.** A `class MinStack`, `LRUCache` and the like is driven
+  the way LeetCode drives it: the operations on one line, their arguments on
+  the next - or the example pasted as it is, headings and all. The object is
+  built, every call made, and Output lists each call and what it returned, the
+  empty ones quieter. The first call that came back wrong gets the card - *At
+  getMin(), call 8 of 8*, and "the 7 calls before it returned what was
+  expected" as a checked fact. The step-through shows the object as `self.s`
+  and `self.mins`, not as an address.
+- **A Problem left over from yesterday says so.** When the pasted Problem's
+  examples do not fit the method in the editor, the card reads *The Problem is
+  for different code*, with one action: clear it and run again.
+- **A loop that can never end is caught and named**, in about five seconds:
+  *Infinite loop*, the `while` line marked, and the reason as a fact -
+  `columnNumber stayed 28 the whole time it was watched`. A run that is only
+  slow, with its values still changing, is given until 12 seconds and then
+  reported as *Still running*, not as stuck; 15 seconds is the hard limit.
+- **Input is a script's stdin.** A program that reads with `input()` gets the
+  *Input* box, a line per call - the way a competitive-programming answer reads
+  its case. One that reads more lines than there are fails at once with an
+  `EOFError`, and the note says which happened: Input was empty, or ran out.
 - When it **crashes**, the failing line is marked in the editor: gutter dot,
   tinted row, and a squiggle under the exact span Python blamed. Editing clears
   the mark.
@@ -46,7 +87,8 @@ elsewhere), so nothing is downloaded and nothing is bundled.
   model is given the same values, so it reads facts rather than simulating the
   program.
 - When it **runs but prints the wrong thing**, you get an expected-vs-got card
-  instead. Fill in *Expected output* and every run is checked against it.
+  instead. Fill in *Expected* (under *Test cases*) and every run is checked
+  against it.
 - **Step through the run.** Every run is traced, crash or no crash, so the panel
   can walk back through it: drag the scrubber and the marker moves down the
   editor while the variables fill in beside it — the list growing, the dict
@@ -54,15 +96,17 @@ elsewhere), so nothing is downloaded and nothing is bundled.
   finished and printed the wrong answer, because nothing raised. The marks
   follow the code as you edit it, rather than pointing at whatever has since
   moved into that line number.
-- **Tell it the problem.** Paste the question you are solving into *Problem*,
-  above the code, and the explanation is judged against what the code was *meant* to do, rather
+- **Tell it the problem.** Paste the question you are solving into the
+  *Problem* tab, and the explanation is judged against what the code was *meant* to do, rather
   than against what the code looks like it is trying to do — which is circular,
-  since the code is the thing that is wrong.
+  since the code is the thing that is wrong. For a `class Solution`, its
+  examples are the test cases too.
 - Either way a local model explains it, unprompted — what went wrong and why,
-  never the corrected code. It is given the traceback, the recorded values and
-  the recorded steps, so it reads facts instead of simulating the program.
-  *Explain again* re-asks; *Show the fix* gives the corrected line when you
-  want it.
+  never the fix. It is given the traceback, the recorded values and how they
+  moved, so it reads facts instead of simulating the program. Whatever it
+  writes, the answer stops at the first sentence or block that hands over the
+  fix, in code or in words, and says it left that out. *Explain again*
+  re-asks; *Show the fix* gives the corrected line when you want it.
 - **Ask follow-ups.** The box at the bottom of the right-hand panel takes any question
   about your code, and remembers the last two exchanges, so a bare "why?" still
   has a subject. Answers stack as notes, not as a chat transcript. Only the
@@ -90,8 +134,8 @@ elsewhere), so nothing is downloaded and nothing is bundled.
   and loads it before you ask anything. The header says *loading…* until it is
   ready. Everything it started is stopped again when you close the app;
   anything that was already running is left alone.
-- The question thread, the problem and the expected output all survive a
-  restart, along with the code.
+- The question thread, the problem, the input and the expected output all
+  survive a restart, along with the code.
 - Drag the divider to resize; <kbd>Ctrl</kbd>+<kbd>+</kbd>/<kbd>-</kbd> for font
   size. <kbd>Alt</kbd>+<kbd>←</kbd>/<kbd>→</kbd> steps through the run. All persist.
 
@@ -224,7 +268,8 @@ simulate the rest.
 
 So the harness also installs `sys.settrace`, filtered to the user's own file,
 and records `(line, the names that changed)`. The wrong-answer prompt carries
-the tail of that, and the panel can scrub through all of it.
+what that recording says about the call that made the answer (see below), and
+the panel can scrub through all of it.
 
 Both ends of a run are kept and the middle is dropped. Keeping only the first
 N steps was the wrong half: setup is rarely where the bug is, and an answer
@@ -250,6 +295,70 @@ Changes are compared by **repr**, not by identity or equality. `graph[u].append(
 mutates a list in place, so the object is the same one it was before and `is`
 sees nothing happen — while the repr, which is what the reader and the model are
 shown, changes.
+
+### A loop that cannot end is a fact, not a timeout
+
+A timeout knows only that time passed. It cannot tell a loop that will never
+finish from one that is merely slow, and "is there an infinite loop?" after
+fifteen seconds is a guess dressed as a diagnosis.
+
+So the harness runs a watchdog thread. After five seconds it looks at the
+running program three times, 0.15s apart, through `sys._current_frames()`:
+which of the user's frames was there every time, which line it is on, and what
+its locals hold. It finds the loop around that line with `ast`, and the names
+its condition reads. A `while` loop ends only when its condition changes, and
+its condition changes only when one of those names does - so if none of them
+moved while it was watched, it cannot end, and that is what is reported:
+the loop, the condition, the names that never changed and the ones that did.
+Anything else - a `for` loop, a long `sleep`, a big sort, a `while` whose
+values are still moving - may only be slow. It is looked at again at twelve
+seconds, inside the editor's own fifteen-second limit so the report always gets
+out, and then called *Still running*, never *Infinite loop*.
+
+The model gets the same facts. Told `columnNumber = 28 (did NOT change)` beside
+`ans = [...] (was changing)`, the 1.5B said the condition stays true because
+`columnNumber` never decreases - which is the bug - without writing the fix.
+
+### The fix stays out, in words too
+
+Told never to write code, the 1.5B mostly does not. It writes the fix in words
+instead. Over 24 automatic explanations of four bugs, 21 gave it away, nearly
+always straight after a correct diagnosis: "To fix this, change
+`columnNumber -= 1` to ...", "Here's how you can do it:", "you should use
+`counts[ch] = 1` instead". Asking harder did not hold, so `teachingOnly()` in
+`ai.js` enforces it: the answer is cut at the first sentence or code block that
+hands over the fix, and a note says what was left out and where it is.
+
+The line it draws is whether the code a sentence puts forward is code the
+student wrote. "The loop should start from `i = 0`" is new code, and is cut;
+"it should return `"AB"`" is the expected value, and "`nums[0]` should be added
+too" is one of their own values - both are kept. A block that only quotes their
+own lines is pointing at the bug, and stays. With it, 0 of 32 answers gave the
+fix away. It errs towards cutting, which is the safe side: *Explain again*
+costs a second, and an answer that did the exercise for them cannot be unseen.
+
+### A wrong answer: the two answers, and how each value moved
+
+The wrong-answer request used to carry the problem statement, the steps one by
+one and six lines of instructions. Given all that, the 1.5B named the cause of
+the reversed `convertToTitle` in 2 answers of 6, and blamed a correct
+`columnNumber -= 1` in the rest. It now gets only facts: the call, the two
+answers, the code, and - from the recording - each name's values in order along
+the one call that made the answer, `columnNumber: 28 -> 27 -> 1 -> 0`, with the
+line that returned it. Then it is asked to walk through how the code gets
+there, and to ask one question. That found the cause in about 6 of 8 on the
+reversed answer, and in 5 of 8 on an off-by-one sum (from 2 of 6). Retelling
+recorded values is a thing a small model does well; finding a cause unaided is
+not. Capping the answer at four sentences did not help, and neither did the
+value histories without the walk-through.
+
+A design problem's answer comes from several calls, so it is told as the calls:
+each one, what it returned, and the object's `self.` values after it, up to the
+first wrong one. On two real design bugs - a MinStack whose `pop` leaves the
+old minimum behind, a two-stack queue that refills when it should not - that
+took answers naming the cause from 3 of 16 to 6 and then 7 of 16 in two runs,
+with fewer invented states and answers about a second sooner. Still a
+minority: this is where a larger model earns its keep.
 
 ### Which model answers, and why it is the small one
 
@@ -281,12 +390,13 @@ What the small model costs, measured:
 
 - **It ignores the no-fix rule.** Told not to, it wrote corrected code in 9 of 9
   explanations of three common crashes. A short prompt with one worked example
-  and the rules repeated at the very end cut that to 4 of 12. The rest is
-  enforced mechanically: `withoutCode()` removes code blocks from the automatic
-  explanation and leaves a note saying *Show the fix* has it. Across those 12,
-  the reader was shown code 0 times. *Show the fix* is untouched, and so are
-  follow-up questions - asking for code outright still gets code.
-- **It rarely ends with a question** - 1 in 12.
+  and the rules repeated at the very end cut that to 4 of 12 - and it then gave
+  the fix in words instead, 21 times in 24. The rest is enforced mechanically:
+  `teachingOnly()` cuts the automatic explanation at the first fix, in code or
+  in prose, and leaves a note saying *Show the fix* has it (see *The fix stays
+  out, in words too*). *Show the fix* is untouched, and so are follow-up
+  questions - asking for code outright still gets code.
+- **It rarely ends with a question** - about 1 in 4, even when asked to.
 - **Without the recorded values it can explain the wrong cause.** For a
   `KeyError` on `counts[ch] += 1` it once said dictionary keys "must be unique".
   Given the values the app records - `counts = {}`, `ch = 'h'` - it named the
@@ -341,7 +451,8 @@ Two details of real tracebacks are easy to get wrong, and both are covered:
 ## Security
 
 ```
-npm test     # eslint, traceback parsing, harness/tracer, XSS payloads, AI prompts/models
+npm test     # eslint, traceback parsing, harness/tracer/Solution runner/loop watchdog,
+             # XSS payloads, test-case parsing, AI prompts/models
 npm audit
 ```
 
@@ -375,13 +486,17 @@ timeout and process-tree kill are there for runaway loops, not hostile code.
 
 ```
 main.js              Electron shell: finds Python, runs it, owns the scratch file
-python/harness.py    runs the file; reports the variables at a failure and
-                     traces the path the run took
+python/harness.py    runs the file; reports the variables at a failure, traces
+                     the path the run took, calls a class Solution on its test
+                     cases, and names a loop that cannot end
 preload.js           the renderer's entire privileged surface
 renderer/
   boot.js            Monaco's AMD bootstrap (separate file - CSP forbids inline)
-  app.js             wiring: run, decorations, setup panel, problem and expected
-                     output, step-through, follow-up thread, selection, voice
+  app.js             wiring: run, decorations, setup panel, the Output / Test
+                     cases / Problem tabs, step-through, follow-up thread,
+                     selection, voice
+  cases.js           a Solution's test cases: from Input or the Problem's
+                     examples, and whether each answer is right
   errors.js          traceback -> file, line, marked span
   ai.js              LM Studio / Ollama streaming, model choice, and the prompts
   markdown.js        escaping + the little markdown the model is asked for
@@ -390,8 +505,9 @@ renderer/
 servers/             voice_server.py (optional speech)
 build/               make-icon.py and icon.png for packaging
 test/                traceback cases and harness runs against real Python;
-                     XSS payloads against the answer renderer; model choice and
-                     the shape of the prompts
+                     XSS payloads against the answer renderer; test cases from
+                     pasted problem pages; model choice and the shape of the
+                     prompts
 install.ps1          Windows shortcuts
 install.sh           macOS bundle / Linux .desktop entry
 ```
@@ -440,8 +556,14 @@ $env:STUDIO_SHOT_ASK  = 45000               # then click Explain again
 $env:STUDIO_SHOT_EXIT = 1                   # quit after capturing
 $env:STUDIO_EVAL      = "..."               # run JS in the page first
 $env:STUDIO_SIZE      = '1400x900'          # window size for the capture
+$env:STUDIO_USERDATA  = 'C:\path\profile'   # a throwaway profile (any time)
 npm start
 ```
+
+`STUDIO_USERDATA` points the app at a profile of its own. A test then cannot
+overwrite your session, and it is not turned away by the single-instance lock
+when you already have the app open. Like the others it is ignored when
+packaged.
 
 In this mode the page's timers are not throttled. A window launched from a
 script usually opens behind the terminal, and Chromium throttles an occluded
@@ -490,13 +612,15 @@ killed mid-session gave "Ollama is not running." with the question kept, and
 **Start it** brought it back and answered in 16s.
 
 Then, for the redesign, one script driving every control in the real app,
-56 checks, all passing: a clean run, its output and its step-through (next,
+56 checks, all passing (60 since the panel became tabs: each tab showing its
+own boxes, arrow keys between them, the dot on a filled tab, and a traceback's
+route set quieter than its last line): a clean run, its output and its step-through (next,
 previous, the editor marker, the values); expected output matching; a crash
 with its line marked, the values shown, the explanation arriving with no code
 in it, *Go to line*, *Explain again* and *Show the fix*; a SyntaxError; a
 wrong answer, its diff, explanation and fix; a follow-up, a question scoped to
 selected code, both quick buttons, clearing the notes; Settings listing the
-models and the checklist, and closing on Escape; both drawers; `input()`
+models and the checklist, and closing on Escape; the panel's tabs; `input()`
 failing in 0.65s; Stop ending a run in under half a second; Stop still
 working on the second of two overlapping runs; 20,000 printed lines; streamed
 output appearing while the program runs; Unicode output; a RecursionError; and
@@ -505,6 +629,36 @@ font zoom. Four bugs found on the way are fixed: `input()` waited out the full
 reported as running cleanly; a run started while another was going could no
 longer be stopped, or timed out, at all; and 20,000 lines printed in 0.8s took
 149s to appear, because each line was drawn on its own.
+
+Then, for LeetCode solutions and loops, a second script of 33 checks in the
+real app, all passing, starting from the `convertToTitle` that used to say
+"printed nothing": its three answers listed with their arguments; the
+Problem's examples used when Input is empty, all three matched; an Expected box
+of unquoted strings matched; a reversed answer marked right, wrong, wrong,
+with the first wrong case on the card and "the right characters, in the
+opposite order" under it; the stuck `while columnNumber > 0` named an
+*Infinite loop* in 6.6s with line 4 marked, `columnNumber` flagged as never
+changing, *Go to line* landing on the loop and the explanation saying why;
+no input asking for a test case with the parameter named; input that does not
+fit saying which parameter the method has; a case that raises keeping the
+answers before it; and a plain script untouched. The 56-check script was run
+again on top, and caught a race that had been there all along: an output chunk
+arriving after the run's result threw away the full output it landed on, so
+20,000 printed lines showed the last 2,000. Chunks now carry their run's number
+and a finished run's are dropped; three runs of 20,000 lines, all 20,000
+shown.
+
+Then, for design problems, stdin and the tutor's filter, a third script of 16
+checks in the real app, all passing, with the 33 and 60 rerun on top (also all
+passing): a MinStack pasted with its example as the page copies it, its
+`pop` leaving the old minimum behind - all eight calls listed, the empty ones
+quiet, the first wrong one on the card as *At getMin(), call 8 of 8* with the
+seven before it stated as right, the explanation arriving with no fix in it,
+and the step-through showing `self.s` and `self.mins`; the same class with no
+cases asking for its calls in its own names; a Problem from another exercise
+named as such and cleared in one click; a Solution that calls itself printing
+its own answer; a script reading two lines of Input as stdin, and an EOFError
+saying Input ran out.
 
 Not exercised: a first-time download of a model that is not already on disk; the
 packaged app's **Run** button specifically (the harness was invoked directly from
@@ -525,17 +679,27 @@ The plan, and the notes needed to pick it up cold, are in **[NEXT.md](NEXT.md)**
 - **The default ignores your hardware.** It is the smallest suitable model
   whatever the GPU; a machine that could run a 7B comfortably still starts on
   the 1.5B until someone picks the 7B in Settings.
-- **The problem statement is never cleared for you.** It survives restarts,
-  and if it describes an older problem, every answer is judged against that.
-  It sits above the code, open whenever it has something in it, so a stale one
-  is at least in plain sight.
-- **No keyboard input.** `input()` fails with an `EOFError`; there is no box to
-  type a program's input into.
-- **The 1.5B can misread a wrong answer.** On the `two_sum` that returns its
-  indices backwards it has described an IndexError that never happened. The
-  diff and the step-through beside it show what really happened.
-- **One test case.** *Expected output* holds a single expected string, not a
-  table of cases.
+- **A stale problem statement is caught only when its examples do not fit.**
+  One whose examples happen to fit today's method is still used, and the
+  explanation of a script is judged against it. Its tab carries a dot whenever
+  it has something in it.
+- **A function at the top level is not a test.** A bare `def two_sum(...)`
+  with no call runs as a script that does nothing; only a `class Solution` or
+  a design class is called on test cases.
+- **Input is stdin, all at once.** It is written when the run starts and then
+  closed, so a program cannot be typed to while it runs.
+- **The 1.5B can still misread a wrong answer.** On the reversed answer it
+  finds the cause in about 6 of 8, an off-by-one sum about 5 of 8, a design
+  bug fewer than half the time. The card's checked difference, the diff and
+  the step-through beside it are what to trust.
+- **The fix filter errs towards cutting.** "You should check what line 3
+  does" is a hint, and is cut with the fixes. The note says something was left
+  out, and *Explain again* asks afresh.
+- **One expected string for a script.** A script that prints is checked against
+  one expected output; only a `class Solution` gets one per case.
+- **A stuck loop can use a lot of memory before it is stopped.** One that
+  appends on every pass grew a list to about 35 million items in its five
+  seconds.
 - **`values` only at a crash.** The dedicated variables panel still needs an
   exception; for a clean run the same information is in the step-through.
 - **A trace is replaced on the next run.** The step-through recording reflects

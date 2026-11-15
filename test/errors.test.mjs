@@ -101,6 +101,15 @@ const clean = parseOf('print("fine")\n');
 assert.strictEqual(clean.parsed, undefined, 'a clean run must parse to nothing');
 console.log('ok    clean run reports no error');
 
+// input() reads the Input box. Whether it was empty decides what to say:
+// "give it something" and "it read more lines than you gave" are different fixes.
+const eof = parseTraceback('Traceback (most recent call last):\n  File "main.py", line 2, in <module>\n'
+	+ '    b = input()\nEOFError: EOF when reading a line\n', 'main.py');
+assert.match(hintFor(eof), /asked for input\(\)\. Put what it should read in Test cases, under Input/);
+assert.match(hintFor(eof, { input: '  \n' }), /under Input/, 'blank is empty');
+assert.match(hintFor(eof, { input: '3\n' }), /called more times than Input has lines/);
+console.log('ok    an EOFError says whether Input was empty or ran out');
+
 rmSync(dir, { recursive: true, force: true });
 console.log(`\n${cases.length - failed}/${cases.length} traceback cases passed`);
 process.exit(failed ? 1 : 0);
